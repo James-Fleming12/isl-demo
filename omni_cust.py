@@ -12,6 +12,53 @@ from safetensors.torch import load_file
 
 from OmniGenCode.OmniGen.transformer import Phi3Config, Phi3Transformer
 
+from torch.utils.data import DataLoader, Dataset
+import json
+from PIL import Image
+
+class JsonFolderDataset(Dataset):
+    def __init__(self, folder_path, processor, image_transform=None, max_input_length=1024):
+        """
+        folder_path: folder containing JSON files and PNGs
+        processor: OmniGenProcessor
+        image_transform: optional transforms to apply to the images
+        """
+        self.folder_path = folder_path
+        self.processor = processor
+        self.image_transform = image_transform
+        self.max_input_length = max_input_length
+
+        self.json_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".json")])
+        if not self.json_files:
+            raise ValueError("No JSON files found in folder")
+
+        self.data = []
+        for jf in self.json_files:
+            with open(os.path.join(folder_path, jf), "r") as f:
+                item = json.load(f)
+                self.data.append(item)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+
+        text = item.get("TEXT") or item.get("caption")
+        if text is None:
+            raise ValueError(f"No text found for index {idx}")
+
+        key = item["key"]
+        image_path = os.path.join(self.folder_path, f"{key}.png")
+        image = Image.open(image_path).convert("RGB")
+        image = image.resize((512, 512), resample=Image.BICUBIC)
+        if self.image_transform:
+            image = self.image_transform(image)
+
+        model_input = self.processor.process_multi_modal_prompt(text, None)
+
+        return model_input, image
+
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
