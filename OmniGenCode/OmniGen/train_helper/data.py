@@ -12,8 +12,8 @@ from torchvision import transforms
 import pickle 
 import re
 
-from OmniGen import OmniGenProcessor
-from OmniGen.processor import OmniGenCollator
+from OmniGenCode.OmniGen import OmniGenProcessor
+from OmniGenCode.OmniGen.processor import OmniGenCollator
 
 
 class DatasetFromJson(torch.utils.data.Dataset):

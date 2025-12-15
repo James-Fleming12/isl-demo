@@ -19,7 +19,7 @@ from diffusers.utils import (
 )
 from safetensors.torch import load_file
 
-from OmniGen import OmniGen, OmniGenProcessor, OmniGenScheduler
+from OmniGenCode.OmniGen import OmniGen, OmniGenProcessor, OmniGenScheduler
 
 
 logger = logging.get_logger(__name__) 
