@@ -10,6 +10,7 @@ from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
 
+from OmniGenCode.OmniGen.train_helper.loss import mean_flat, sample_timestep, sample_x0
 from OmniGenCode.OmniGen.transformer import Phi3Config, Phi3Transformer
 
 from torch.utils.data import DataLoader, Dataset
@@ -229,6 +230,8 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         self.llm = Phi3Transformer(config=transformer_config)
         self.llm.config.use_cache = False
+
+        self.num_layers = transformer_config.num_hidden_layers + 1
     
     @classmethod
     def from_pretrained(cls, model_name):
@@ -376,7 +379,8 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         else:
             input_emb = torch.cat([time_token, x], dim=1)
 
-        output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model)
+        output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
         if input_is_list:
             image_embedding = output[:, -max(num_tokens):]
@@ -392,11 +396,37 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             time_emb = self.t_embedder(timestep, dtype=x.dtype)
             x = self.final_layer(image_embedding, time_emb)
             latents = self.unpatchify(x, shapes[0], shapes[1])
-            
+
+        layer_image_embeddings = []
+        for layer_hidden_state in hidden_states:
+            if input_is_list:
+                layer_image_embedding = layer_hidden_state[:, -max(num_tokens):]
+            else:
+                layer_image_embedding = layer_hidden_state[:, -num_tokens:]
+            layer_image_embeddings.append(layer_image_embedding)
+
+        projected_hidden_states = []
+        time_emb = self.t_embedder(timestep, dtype=x.dtype)
+        for layer_image_embedding in layer_image_embeddings:
+            projected = self.final_layer(layer_image_embedding, time_emb)
+            projected_hidden_states.append(projected)
+
+        unpatched_hidden_states = []
+        for i, projected in enumerate(projected_hidden_states):
+            if input_is_list:
+                latents_per_layer = []
+                for j in range(projected.size(0)):
+                    latent = projected[j:j+1, :num_tokens[j]]
+                    latent_unpatched = self.unpatchify(latent, shapes[j][0], shapes[j][1])
+                    latents_per_layer.append(latent_unpatched)
+                unpatched_hidden_states.append(latents_per_layer)
+            else:
+                latent_unpatched = self.unpatchify(projected, shapes[0], shapes[1])
+                unpatched_hidden_states.append(latent_unpatched)
 
         if return_past_key_values:
             return latents, past_key_values
-        return latents
+        return latents, unpatched_hidden_states
 
     @torch.no_grad()
     def forward_with_cfg(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, cfg_scale, use_img_cfg, img_cfg_scale, past_key_values, use_kv_cache, offload_model):      
@@ -442,3 +472,45 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             return model_out[0]
         
         return torch.cat(model_out, dim=0), pask_key_values
+    
+def isl_training_losses(model: CustomOmniGen, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+    """Loss for training torche score model
+    Args:
+    - model: backbone model; could be score, noise, or velocity
+    - x1: datapoint
+    - model_kwargs: additional arguments for torch model
+    """
+    if model_kwargs == None:
+        model_kwargs = {}
+
+    B = len(x1)
+
+    x0 = sample_x0(x1)
+    t = sample_timestep(x1)
+
+    xt = [t[i] * x1[i] + (1 - t[i]) * x0[i] for i in range(B)]
+    ut = [x1[i] - x0[i] for i in range(B)]
+
+    model_output, hidden_states = model(xt, t, **model_kwargs)
+
+    terms = {}
+    terms["loss"] = 0.0
+
+    num_layers = model.num_layers
+    intermediate_noise_levels = [0.75, 0.5, 0.25]
+    intermediate_layer_indices = [num_layers*3//4, num_layers//2, num_layers//4]
+
+    for index, i in enumerate(intermediate_layer_indices):
+        layer_target = [ut[j] * (1 - intermediate_noise_levels[index]) for j in range(B)]
+
+        terms["loss"] += torch.stack(
+            [((layer_target[j] - hidden_states[i][j]) ** 2).mean() for j in range(B)],
+            dim=0,
+        )
+    
+    terms["loss"] += torch.stack(
+        [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
+        dim=0,
+    )
+
+    return terms

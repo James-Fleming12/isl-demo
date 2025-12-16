@@ -11,7 +11,7 @@ from datasets import load_dataset
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 from fm_noise_scheduler import FlowMatchEulerDiscreteScheduler
 
-from omni_cust import CustomOmniGen, JsonFolderDataset
+from omni_cust import CustomOmniGen, JsonFolderDataset, isl_training_losses
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.utils import vae_encode, vae_encode_list
 from OmniGenCode.OmniGen.train_helper import training_losses
@@ -73,13 +73,15 @@ def main():
                 return_past_key_values=False
             )
 
-            loss_dict = training_losses(model, output_images, model_kwargs)
+            loss_dict = isl_training_losses(model, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"].mean()
             total_loss += loss
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            print(f"Batch {batch}: Loss {loss}")
 
         print(f"Epoch {epoch}: Loss {total_loss}")
 
