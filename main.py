@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -21,13 +22,17 @@ from transformers import Phi3Config
 def main():
     batch_size = 2
     lr = 1e-4
-    epochs = 10
+    epochs = 50
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    log_file = os.path.join("logs", f"log.txt")
     
     config = Phi3Config(
-        hidden_size=512,
-        num_hidden_layers=4,
-        num_attention_heads=8,
+        hidden_size=1536,
+        intermediate_size=4096,
+        num_hidden_layers=16,
+        num_attention_heads=16,
+        num_key_value_heads=8
     )
     model = CustomOmniGen(config)
     model.to(device)
@@ -37,6 +42,7 @@ def main():
 
     processor = OmniGenProcessor.from_pretrained("Shitao/OmniGen-v1")
     vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
+    vae.eval()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -44,16 +50,18 @@ def main():
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
-    dataset = JsonFolderDataset("00000", processor, image_transform)
+    dataset = JsonFolderDataset("00000", processor, image_transform, small_subset=True)
     collate_fn = TrainDataCollator(
         pad_token_id=processor.text_tokenizer.eos_token_id,
         hidden_size=model.llm.config.hidden_size,
         keep_raw_resolution=True
     )
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    best_loss = float('inf')
 
     for epoch in range(epochs):
         total_loss = 0.0
+        num_batches = 0
         for batch, data in enumerate(dataloader):
             output_images = [img.to(device) for img in data['output_images']]
             with torch.no_grad():
@@ -76,6 +84,7 @@ def main():
             loss_dict = isl_training_losses(model, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"].mean()
             total_loss += loss
+            num_batches += 1
 
             optimizer.zero_grad()
             loss.backward()
@@ -83,7 +92,23 @@ def main():
 
             print(f"Batch {batch}: Loss {loss}")
 
-        print(f"Epoch {epoch}: Loss {total_loss}")
+        avg_loss = total_loss / num_batches
+
+        with open(log_file, 'a') as f:
+            f.write(f"{epoch} {avg_loss}\n")
+
+        if avg_loss < best_loss:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': total_loss,
+                'config': config,
+            }, 'omnigen_model.pth')
+            best_loss = avg_loss
+            print(f"Best Model saved with loss: {avg_loss}")
+        else:
+            print(f"Epoch {epoch}: Loss {avg_loss}")
 
 if __name__=="__main__":
     main()

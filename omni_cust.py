@@ -18,7 +18,7 @@ import json
 from PIL import Image
 
 class JsonFolderDataset(Dataset):
-    def __init__(self, folder_path, processor, image_transform=None, max_input_length=1024):
+    def __init__(self, folder_path, processor, image_transform=None, max_input_length=1024, small_subset=False):
         """
         folder_path: folder containing JSON files and PNGs
         processor: OmniGenProcessor
@@ -32,12 +32,18 @@ class JsonFolderDataset(Dataset):
         self.json_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".json")])
         if not self.json_files:
             raise ValueError("No JSON files found in folder")
+        
+        samples_loaded = 0
+        max_samples = 1000
 
         self.data = []
         for jf in self.json_files:
+            if small_subset and samples_loaded > max_samples:
+                break
             with open(os.path.join(folder_path, jf), "r") as f:
                 item = json.load(f)
                 self.data.append(item)
+            samples_loaded+=1
 
     def __len__(self):
         return len(self.data)
