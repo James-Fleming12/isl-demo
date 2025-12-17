@@ -7,11 +7,14 @@ from torchvision import transforms
 
 from diffusers.models import AutoencoderKL
 
+from OmniGenCode.OmniGen.model import OmniGen
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 
-from omni_cust import CustomOmniGen, JsonFolderDataset, isl_training_losses
+from omni_cust import JsonFolderDataset
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.utils import vae_encode, vae_encode_list
+from OmniGenCode.OmniGen.train_helper import training_losses
+
 from transformers import Phi3Config
 
 def main():
@@ -20,7 +23,7 @@ def main():
     epochs = 50
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    log_file = os.path.join("logs", f"log.txt")
+    log_file = os.path.join("logs", f"ref_log.txt")
     
     config = Phi3Config(
         hidden_size=1536,
@@ -29,7 +32,7 @@ def main():
         num_attention_heads=16,
         num_key_value_heads=8
     )
-    model = CustomOmniGen(config)
+    model = OmniGen(config)
     model.to(device)
     model.llm.config.use_cache = False
     model.llm.gradient_checkpointing_enable()
@@ -76,7 +79,7 @@ def main():
                 return_past_key_values=False
             )
 
-            loss_dict = isl_training_losses(model, output_images, model_kwargs=model_kwargs)
+            loss_dict = training_losses(model, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"].mean()
             total_loss += loss
             num_batches += 1
@@ -99,7 +102,7 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': total_loss,
                 'config': config,
-            }, 'omnigen_model.pth')
+            }, 'omnigen_ref_model.pth')
             best_loss = avg_loss
             print(f"Best Model saved with loss: {avg_loss}")
         else:
