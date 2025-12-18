@@ -24,6 +24,9 @@ class JsonFolderDataset(Dataset):
         processor: OmniGenProcessor
         image_transform: optional transforms to apply to the images
         """
+        samples_loaded = 0
+        max_samples = 10
+
         self.folder_path = folder_path
         self.processor = processor
         self.image_transform = image_transform
@@ -32,9 +35,6 @@ class JsonFolderDataset(Dataset):
         self.json_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".json")])
         if not self.json_files:
             raise ValueError("No JSON files found in folder")
-        
-        samples_loaded = 0
-        max_samples = 1000
 
         self.data = []
         for jf in self.json_files:
@@ -108,7 +108,6 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq)
         return t_emb
 
-
 class FinalLayer(nn.Module):
     """
     The final layer of DiT.
@@ -127,7 +126,6 @@ class FinalLayer(nn.Module):
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
-
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0, interpolation_scale=1.0, base_size=1):
     """
@@ -159,7 +157,6 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
     emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
     return emb
 
-
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     """
     embed_dim: output dimension for each position
@@ -180,7 +177,6 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
 
-
 class PatchEmbedMR(nn.Module):
     """ 2D Image to Patch Embedding
     """
@@ -198,7 +194,6 @@ class PatchEmbedMR(nn.Module):
         x = self.proj(x)
         x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
         return x
-
 
 class CustomOmniGen(nn.Module, PeftAdapterMixin):
     """
@@ -412,9 +407,19 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             layer_image_embeddings.append(layer_image_embedding)
 
         projected_hidden_states = []
-        time_emb = self.t_embedder(timestep, dtype=x.dtype)
-        for layer_image_embedding in layer_image_embeddings:
-            projected = self.final_layer(layer_image_embedding, time_emb)
+        batch_size = timestep.size(0)
+        hidden_timesteps = torch.zeros((batch_size, self.num_layers), device=timestep.device, dtype=timestep.dtype)
+        for b in range(batch_size):
+            hidden_timesteps[b] = torch.linspace(float(timestep[b]), 0, self.num_layers, device=timestep.device, dtype=timestep.dtype)
+
+        time_embs = []
+        for layer_idx in range(self.num_layers):
+            layer_t = hidden_timesteps[:, layer_idx]
+            time_emb = self.t_embedder(layer_t, dtype=x.dtype)
+            time_embs.append(time_emb)
+
+        for i, layer_image_embedding in enumerate(layer_image_embeddings):
+            projected = self.final_layer(layer_image_embedding, time_embs[i])
             projected_hidden_states.append(projected)
 
         unpatched_hidden_states = []
