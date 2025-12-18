@@ -603,8 +603,8 @@ def isl_training_losses(model: CustomOmniGen, x1, model_kwargs=None, snr_type='u
     
     device = x1.device
 
-    t = sample_timestep(x1)
-    # t = torch.ones(B).to(device)
+    # t = sample_timestep(x1)
+    t = torch.ones(B).to(device)
 
     xt = t.view(-1, 1, 1, 1) * x0 + (1 - t.view(-1, 1, 1, 1)) * x1
     
