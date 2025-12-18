@@ -11,11 +11,13 @@ from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
 
 from OmniGenCode.OmniGen.train_helper.loss import mean_flat, sample_timestep, sample_x0
-from OmniGenCode.OmniGen.transformer import Phi3Config, Phi3Transformer
+from OmniGenCode.OmniGen.transformer import Phi3Config
 
 from torch.utils.data import DataLoader, Dataset
 import json
 from PIL import Image
+
+from cust_phi import QuarterBlockPhi3Transformer
 
 class JsonFolderDataset(Dataset):
     def __init__(self, folder_path, processor, image_transform=None, max_input_length=1024, small_subset=False):
@@ -229,7 +231,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         self.initialize_weights()
 
-        self.llm = Phi3Transformer(config=transformer_config)
+        self.llm = QuarterBlockPhi3Transformer(config=transformer_config)
         self.llm.config.use_cache = False
 
         self.num_layers = transformer_config.num_hidden_layers + 1
@@ -359,7 +361,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         return latents, num_tokens, shapes
 
     
-    def forward(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
+    def forward(self, x, timestep, input_ids, block_inputs, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
         time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)   
@@ -380,7 +382,14 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         else:
             input_emb = torch.cat([time_token, x], dim=1)
 
-        output = self.llm(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        for index, i in enumerate(block_inputs):
+            if i.dim() == 5 and i.shape[1] == 1: # problem with stacking
+                block_inputs[index] = i.squeeze(1)
+
+        for index, i in enumerate(block_inputs):
+            block_inputs[index] = self.x_embedder(i)
+
+        output = self.llm(inputs_embeds=input_emb, block_inputs=block_inputs, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
         hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
         if input_is_list:
@@ -502,23 +511,30 @@ def isl_training_losses(model: CustomOmniGen, x1, model_kwargs=None, snr_type='u
     xt = [t[i] * x1[i] + (1 - t[i]) * x0[i] for i in range(B)]
     ut = [x1[i] - x0[i] for i in range(B)]
 
+    num_layers = model.num_layers
+    intermediate_noise_levels = [0.75, 0.5, 0.25]
+    intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
+
+    layer_targets = []
+
+    for index, i in enumerate(intermediate_noise_levels):
+        batch_tensors = [ut[j] * (1 - intermediate_noise_levels[index]) for j in range(B)]
+        layer_target_batch = torch.stack(batch_tensors, dim=0)
+        layer_targets.append(layer_target_batch)
+
+    model_kwargs["block_inputs"] = layer_targets
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
     terms = {}
     terms["loss"] = 0.0
 
-    num_layers = model.num_layers
-    intermediate_noise_levels = [0.75, 0.5, 0.25]
-    intermediate_layer_indices = [num_layers*3//4, num_layers//2, num_layers//4]
-
     for index, i in enumerate(intermediate_layer_indices):
         layer_target = [ut[j] * (1 - intermediate_noise_levels[index]) for j in range(B)]
-
         terms["loss"] += torch.stack(
             [((layer_target[j] - hidden_states[i][j]) ** 2).mean() for j in range(B)],
             dim=0,
         )
-    
+
     terms["loss"] += torch.stack(
         [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
         dim=0,

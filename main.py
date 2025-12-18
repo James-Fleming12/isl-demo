@@ -67,6 +67,7 @@ def main():
                 padding_latent = [p.to(device=output_images[0].device) if p is not None else None for p in padding_latent]
             model_kwargs = dict(
                 input_ids=data['input_ids'].to(device),
+                block_inputs=None,
                 input_img_latents=None,
                 input_image_sizes=data['input_image_sizes'],
                 attention_mask=data['attention_mask'].to(device),
