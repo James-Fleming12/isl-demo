@@ -27,7 +27,7 @@ class JsonFolderDataset(Dataset):
         image_transform: optional transforms to apply to the images
         """
         samples_loaded = 0
-        max_samples = 10
+        max_samples = 1
 
         self.folder_path = folder_path
         self.processor = processor
@@ -447,6 +447,87 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         if return_past_key_values:
             return latents, past_key_values
         return latents, unpatched_hidden_states
+    
+    def inference(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
+        input_is_list = isinstance(x, list)
+        x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
+        time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)   
+        
+        if input_img_latents is not None:
+            input_latents, _, _ = self.patch_multiple_resolutions(input_img_latents, is_input_images=True)
+        if input_ids is not None:
+            condition_embeds = self.llm.embed_tokens(input_ids).clone()
+            input_img_inx = 0
+            for b_inx in input_image_sizes.keys():
+                for start_inx, end_inx in input_image_sizes[b_inx]:
+                    condition_embeds[b_inx, start_inx: end_inx] = input_latents[input_img_inx]
+                    input_img_inx += 1
+            if input_img_latents is not None:
+                assert input_img_inx == len(input_latents) 
+
+            input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
+        else:
+            input_emb = torch.cat([time_token, x], dim=1)
+
+        output = self.llm.inference(inputs_embeds=input_emb, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        hidden_states = output.hidden_states
+        output, past_key_values = output.last_hidden_state, output.past_key_values
+        if input_is_list:
+            image_embedding = output[:, -max(num_tokens):]
+            time_emb = self.t_embedder(timestep, dtype=x.dtype)
+            x = self.final_layer(image_embedding, time_emb)
+            latents = []
+            for i in range(x.size(0)):
+                latent = x[i:i+1, :num_tokens[i]]
+                latent = self.unpatchify(latent, shapes[i][0], shapes[i][1])
+                latents.append(latent)
+        else:
+            image_embedding = output[:, -num_tokens:]
+            time_emb = self.t_embedder(timestep, dtype=x.dtype)
+            x = self.final_layer(image_embedding, time_emb)
+            latents = self.unpatchify(x, shapes[0], shapes[1])
+
+        layer_image_embeddings = []
+        for layer_hidden_state in hidden_states:
+            if input_is_list:
+                layer_image_embedding = layer_hidden_state[:, -max(num_tokens):]
+            else:
+                layer_image_embedding = layer_hidden_state[:, -num_tokens:]
+            layer_image_embeddings.append(layer_image_embedding)
+
+        projected_hidden_states = []
+        batch_size = timestep.size(0)
+        hidden_timesteps = torch.zeros((batch_size, self.num_layers), device=timestep.device, dtype=timestep.dtype)
+        for b in range(batch_size):
+            hidden_timesteps[b] = torch.linspace(float(timestep[b]), 0, self.num_layers, device=timestep.device, dtype=timestep.dtype)
+
+        time_embs = []
+        for layer_idx in range(self.num_layers):
+            layer_t = hidden_timesteps[:, layer_idx]
+            time_emb = self.t_embedder(layer_t, dtype=x.dtype)
+            time_embs.append(time_emb)
+
+        for i, layer_image_embedding in enumerate(layer_image_embeddings):
+            projected = self.final_layer(layer_image_embedding, time_embs[i])
+            projected_hidden_states.append(projected)
+
+        unpatched_hidden_states = []
+        for i, projected in enumerate(projected_hidden_states):
+            if input_is_list:
+                latents_per_layer = []
+                for j in range(projected.size(0)):
+                    latent = projected[j:j+1, :num_tokens[j]]
+                    latent_unpatched = self.unpatchify(latent, shapes[j][0], shapes[j][1])
+                    latents_per_layer.append(latent_unpatched)
+                unpatched_hidden_states.append(latents_per_layer)
+            else:
+                latent_unpatched = self.unpatchify(projected, shapes[0], shapes[1])
+                unpatched_hidden_states.append(latent_unpatched)
+
+        if return_past_key_values:
+            return latents, past_key_values
+        return latents, unpatched_hidden_states
+
 
     @torch.no_grad()
     def forward_with_cfg(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, cfg_scale, use_img_cfg, img_cfg_scale, past_key_values, use_kv_cache, offload_model):      
@@ -494,50 +575,75 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         return torch.cat(model_out, dim=0), pask_key_values
     
 def isl_training_losses(model: CustomOmniGen, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
-    """Loss for training torche score model
+    """Loss for training the score model
     Args:
     - model: backbone model; could be score, noise, or velocity
-    - x1: datapoint
+    - x1: clean datapoint (can be list of tensors or tensor)
     - model_kwargs: additional arguments for torch model
+    
+    Convention: t=1 is full noise, t=0 is clean
     """
     if model_kwargs == None:
         model_kwargs = {}
+    
+    if isinstance(x1, list):
+        if x1[0].dim() == 4:
+            x1 = torch.cat(x1, dim=0)
+        else:
+            x1 = torch.stack(x1, dim=0)
 
-    B = len(x1)
-
+    B = x1.shape[0]
     x0 = sample_x0(x1)
+
+    if isinstance(x0, list):
+        if x0[0].dim() == 4:
+            x0 = torch.cat(x0, dim=0)
+        else:
+            x0 = torch.stack(x0, dim=0)
+    
+    device = x1.device
+
     t = sample_timestep(x1)
+    # t = torch.ones(B).to(device)
 
-    xt = [t[i] * x1[i] + (1 - t[i]) * x0[i] for i in range(B)]
-    ut = [x1[i] - x0[i] for i in range(B)]
-
+    xt = t.view(-1, 1, 1, 1) * x0 + (1 - t.view(-1, 1, 1, 1)) * x1
+    
     num_layers = model.num_layers
     intermediate_noise_levels = [0.75, 0.5, 0.25]
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
 
     layer_targets = []
-
-    for index, i in enumerate(intermediate_noise_levels):
-        batch_tensors = [ut[j] * (1 - intermediate_noise_levels[index]) for j in range(B)]
-        layer_target_batch = torch.stack(batch_tensors, dim=0)
-        layer_targets.append(layer_target_batch)
-
+    for noise_level in intermediate_noise_levels:
+        target = noise_level * x0 + (1 - noise_level) * x1
+        layer_targets.append(target)
+    
     model_kwargs["block_inputs"] = layer_targets
+    
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
+    if isinstance(model_output, list):
+        if model_output[0].dim() == 4:
+            model_output = torch.cat(model_output, dim=0)
+        else:
+            model_output = torch.stack(model_output, dim=0)
+    
     terms = {}
-    terms["loss"] = 0.0
+    total_loss = 0.0
 
     for index, i in enumerate(intermediate_layer_indices):
-        layer_target = [ut[j] * (1 - intermediate_noise_levels[index]) for j in range(B)]
-        terms["loss"] += torch.stack(
-            [((layer_target[j] - hidden_states[i][j]) ** 2).mean() for j in range(B)],
-            dim=0,
-        )
+        layer_target = intermediate_noise_levels[index] * x0 + (1 - intermediate_noise_levels[index]) * x1
+        
+        hidden_state = hidden_states[i]
+        if isinstance(hidden_state, list):
+            if hidden_state[0].dim() == 4:
+                hidden_state = torch.cat(hidden_state, dim=0)
+            else:
+                hidden_state = torch.stack(hidden_state, dim=0)
+        
+        total_loss += ((layer_target - hidden_state) ** 2).mean()
 
-    terms["loss"] += torch.stack(
-        [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
-        dim=0,
-    )
+    total_loss += ((x1 - model_output) ** 2).mean()
+    
+    terms["loss"] = total_loss
 
     return terms
