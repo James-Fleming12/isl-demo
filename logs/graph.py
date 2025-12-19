@@ -16,7 +16,7 @@ def read_file(filename):
 def normalize_data(data):
     return (data - np.min(data)) / (np.max(data) - np.min(data))
 
-file_name = "logs/isl_log.txt"
+file_name = "logs/old_isl_log.txt"
 ref_file = "logs/ref_log.txt"
 
 epochs, losses = read_file(file_name)

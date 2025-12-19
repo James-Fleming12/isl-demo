@@ -26,8 +26,8 @@ class JsonFolderDataset(Dataset):
         processor: OmniGenProcessor
         image_transform: optional transforms to apply to the images
         """
-        samples_loaded = 0
-        max_samples = 1
+        samples_loaded = 1
+        max_samples = 2
 
         self.folder_path = folder_path
         self.processor = processor

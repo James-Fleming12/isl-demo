@@ -8,6 +8,7 @@ from torchvision import transforms
 from diffusers.models import AutoencoderKL
 
 from OmniGenCode.OmniGen.model import OmniGen
+from OmniGenCode.OmniGen.pipeline import OmniGenPipeline
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 
 from omni_cust import JsonFolderDataset
@@ -20,7 +21,7 @@ from transformers import Phi3Config
 def main():
     batch_size = 2
     lr = 1e-4
-    epochs = 50
+    epochs = 750
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     log_file = os.path.join("logs", f"ref_log.txt")
@@ -88,25 +89,34 @@ def main():
             loss.backward()
             optimizer.step()
 
-            print(f"Batch {batch}: Loss {loss}")
-
         avg_loss = total_loss / num_batches
+
+        print(f"Epoch {epoch+1}: {avg_loss}")
 
         with open(log_file, 'a') as f:
             f.write(f"{epoch} {avg_loss}\n")
 
-        if avg_loss < best_loss:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': total_loss,
-                'config': config,
-            }, 'omnigen_ref_model.pth')
-            best_loss = avg_loss
-            print(f"Best Model saved with loss: {avg_loss}")
-        else:
-            print(f"Epoch {epoch}: Loss {avg_loss}")
+        # if avg_loss < best_loss:
+        #     torch.save({
+        #         'epoch': epoch,
+        #         'model_state_dict': model.state_dict(),
+        #         'optimizer_state_dict': optimizer.state_dict(),
+        #         'loss': total_loss,
+        #         'config': config,
+        #     }, 'omnigen_ref_model.pth')
+        #     best_loss = avg_loss
+        #     print(f"Best Model saved with loss: {avg_loss}")
+        # else:
+        #     print(f"Epoch {epoch}: Loss {avg_loss}")
+
+    pipe = OmniGenPipeline(vae, model, processor)
+    images = pipe(
+        prompt="Oona for iPhone 4/4S/5/5S & Android",
+        width=464,
+        height=464,
+        guidance_scale=1
+    )
+    images[0].save("example.png")
 
 if __name__=="__main__":
     main()
