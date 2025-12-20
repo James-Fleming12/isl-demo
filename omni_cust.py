@@ -268,6 +268,22 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         """
         mapped_state_dict = {}
 
+        target_format = None
+        for key in custom_state_dict.keys():
+            if key.startswith('llm.blocks.'):
+                target_format = 'blocks_modulelist'
+                break
+            elif key.startswith('llm.block1.') or key.startswith('llm.block2.') or \
+                key.startswith('llm.block3.') or key.startswith('llm.block4.'):
+                target_format = 'blocks_direct'
+                break
+        
+        if target_format is None:
+            print("Warning: Could not determine target format from custom_state_dict")
+            return omni_state_dict
+        
+        print(f"Detected target format: {target_format}")
+
         num_layers = None
         for key in omni_state_dict.keys():
             if key.startswith('llm.layers.'):
@@ -282,6 +298,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         assert num_layers % 4 == 0, f"Number of layers ({num_layers}) must be divisible by 4"
         
         quarter = num_layers // 4
+        print(f"Mapping {num_layers} layers ({quarter} per block)")
 
         for key, value in omni_state_dict.items():
             if key.startswith('llm.layers.'):
@@ -290,19 +307,24 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 param_path = '.'.join(parts[3:])
 
                 if layer_idx < quarter:
-                    block_name = 'block1'
+                    block_idx = 0
                     new_idx = layer_idx
                 elif layer_idx < 2 * quarter:
-                    block_name = 'block2'
+                    block_idx = 1
                     new_idx = layer_idx - quarter
                 elif layer_idx < 3 * quarter:
-                    block_name = 'block3'
+                    block_idx = 2
                     new_idx = layer_idx - 2 * quarter
                 else:
-                    block_name = 'block4'
+                    block_idx = 3
                     new_idx = layer_idx - 3 * quarter
 
-                new_key = f'llm.{block_name}.{new_idx}.{param_path}'
+                if target_format == 'blocks_modulelist':
+                    new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
+                else:
+                    block_name = f'block{block_idx + 1}'
+                    new_key = f'llm.{block_name}.{new_idx}.{param_path}'
+                
                 mapped_state_dict[new_key] = value
                 
             elif key.startswith('llm.'):
@@ -314,9 +336,11 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
         
         if missing_keys:
-            print(f"Warning: Missing keys in mapped state dict: {missing_keys}")
+            print(f"Warning: {len(missing_keys)} missing keys in mapped state dict")
+            print(f"First few missing keys: {list(missing_keys)[:5]}")
         if unexpected_keys:
-            print(f"Warning: Unexpected keys in mapped state dict: {unexpected_keys}")
+            print(f"Warning: {len(unexpected_keys)} unexpected keys in mapped state dict")
+            print(f"First few unexpected keys: {list(unexpected_keys)[:5]}")
         
         return mapped_state_dict
 
@@ -333,10 +357,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         Returns:
             CustomOmniGen model loaded with weights from OmniGen checkpoint
         """
-        import os
-        from huggingface_hub import snapshot_download
-        from safetensors.torch import load_file
-        
         if not os.path.exists(model_name):
             cache_folder = os.getenv('HF_HUB_CACHE')
             model_name = snapshot_download(
