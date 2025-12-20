@@ -257,7 +257,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
     def from_pretrained_other(cls, model_name: str, map_llm_params: bool = True, strict: bool = True):
         if not os.path.exists(model_name):
             cache_folder = os.getenv('HF_HUB_CACHE')
-            model_name = snapshot_download(repo_id=model_name, cache_die=cache_folder, ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
+            model_name = snapshot_download(repo_id=model_name, cache_dir=cache_folder, ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
 
         config = Phi3Config.from_pretrained(model_name)
         model = cls(config)
