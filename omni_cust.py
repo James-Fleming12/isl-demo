@@ -197,6 +197,62 @@ class PatchEmbedMR(nn.Module):
         x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
         return x
 
+class CustomOmniGen(nn.Module, PeftAdapterMixin):
+    """
+    Diffusion model with a Transformer backbone.
+    """
+    def __init__(
+        self,
+        transformer_config: Phi3Config,
+        patch_size=2,
+        in_channels=4,
+        pe_interpolation: float = 1.0,
+        pos_embed_max_size: int = 192,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.patch_size = patch_size
+        self.pos_embed_max_size = pos_embed_max_size
+
+        hidden_size = transformer_config.hidden_size
+
+        self.x_embedder = PatchEmbedMR(patch_size, in_channels, hidden_size, bias=True)
+        self.input_x_embedder = PatchEmbedMR(patch_size, in_channels, hidden_size, bias=True)
+
+        self.time_token = TimestepEmbedder(hidden_size)
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        
+        self.pe_interpolation = pe_interpolation
+        pos_embed = get_2d_sincos_pos_embed(hidden_size, pos_embed_max_size, interpolation_scale=self.pe_interpolation, base_size=64)
+        self.register_buffer("pos_embed", torch.from_numpy(pos_embed).float().unsqueeze(0), persistent=True)
+
+        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+
+        self.initialize_weights()
+
+        self.llm = QuarterBlockPhi3Transformer(config=transformer_config)
+        self.llm.config.use_cache = False
+
+        self.num_layers = transformer_config.num_hidden_layers + 1
+    
+    @classmethod
+    def from_pretrained(cls, model_name):
+        if not os.path.exists(model_name):
+            cache_folder = os.getenv('HF_HUB_CACHE')
+            model_name = snapshot_download(repo_id=model_name,
+                                           cache_dir=cache_folder,
+                                           ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
+        config = Phi3Config.from_pretrained(model_name)
+        model = cls(config)
+        if os.path.exists(os.path.join(model_name, 'model.safetensors')):
+            print("Loading safetensors")
+            ckpt = load_file(os.path.join(model_name, 'model.safetensors'))
+        else:
+            ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
+        model.load_state_dict(ckpt)
+        return model
+    
     @staticmethod
     def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -311,7 +367,8 @@ class PatchEmbedMR(nn.Module):
             model.load_state_dict(mapped_ckpt, strict=strict)
         
         return model
-    
+        
+
     def initialize_weights(self):
         assert not hasattr(self, "llama")
 
