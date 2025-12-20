@@ -377,53 +377,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 mapped_state_dict[key] = omni_state_dict[key]
 
         return mapped_state_dict
-    
-    @staticmethod
-    def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Map OmniGen state dict to CustomOmniGen state dict.
-        This handles the transformation from Phi3Transformer to QuarterBlockPhi3Transformer.
-        """
-        mapped_state_dict = {}
-        
-        for key, value in omni_state_dict.items():
-            if key.startswith('llm.'):
-                new_key = key
-                if '.mlp.' in key:
-                    # Example: Handle MLP layer differences
-                    # You might need to split or combine weights here
-                    pass
-                elif '.self_attn.' in key:
-                    # Example: Handle attention layer differences
-                    # QuarterBlock might have different attention structure
-                    pass
-                elif key.startswith('llm.layers.'):
-                    # Example: QuarterBlock might have 1/4 the layers
-                    # You might need to select which layers to copy or average
-                    # This is architecture-specific
-                    pass
-                
-                # For now, keep the same key structure assuming compatibility
-                # You'll need to customize this based on your QuarterBlockPhi3Transformer implementation
-                mapped_state_dict[new_key] = value
-            else:
-                # Copy non-llm weights directly (should be compatible)
-                mapped_state_dict[key] = value
-        
-        # Check for missing keys in custom model
-        custom_keys = set(custom_state_dict.keys())
-        mapped_keys = set(mapped_state_dict.keys())
-        
-        missing_keys = custom_keys - mapped_keys
-        unexpected_keys = mapped_keys - custom_keys
-        
-        if missing_keys:
-            print(f"Missing keys in mapped state dict: {missing_keys}")
-        if unexpected_keys:
-            print(f"Unexpected keys in mapped state dict: {unexpected_keys}")
-        
-        return mapped_state_dict
-
 
     def initialize_weights(self):
         assert not hasattr(self, "llama")
