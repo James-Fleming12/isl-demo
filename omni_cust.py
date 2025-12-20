@@ -252,7 +252,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
         model.load_state_dict(ckpt)
         return model
-    
+
     @staticmethod
     def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -276,7 +276,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                     num_layers = layer_idx + 1
         
         if num_layers is None:
-            print("Could not determine number of layers, attempting direct mapping")
+            print("Warning: Could not determine number of layers, attempting direct mapping")
             return omni_state_dict
         
         assert num_layers % 4 == 0, f"Number of layers ({num_layers}) must be divisible by 4"
@@ -288,28 +288,28 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 parts = key.split('.')
                 layer_idx = int(parts[2])
                 param_path = '.'.join(parts[3:])
-
+                
                 if layer_idx < quarter:
-                    block_name = 'block1'
+                    block_idx = 0
                     new_idx = layer_idx
                 elif layer_idx < 2 * quarter:
-                    block_name = 'block2'
+                    block_idx = 1
                     new_idx = layer_idx - quarter
                 elif layer_idx < 3 * quarter:
-                    block_name = 'block3'
+                    block_idx = 2
                     new_idx = layer_idx - 2 * quarter
                 else:
-                    block_name = 'block4'
+                    block_idx = 3
                     new_idx = layer_idx - 3 * quarter
 
-                new_key = f'llm.{block_name}.{new_idx}.{param_path}'
+                new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
                 mapped_state_dict[new_key] = value
                 
             elif key.startswith('llm.'):
                 mapped_state_dict[key] = value
             else:
                 mapped_state_dict[key] = value
-        
+
         missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
         unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
         
@@ -344,7 +344,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 cache_dir=cache_folder, 
                 ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
             )
-
+        
         from transformers import Phi3Config
         config = Phi3Config.from_pretrained(model_name)
         model = cls(config)
@@ -367,7 +367,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             model.load_state_dict(mapped_ckpt, strict=strict)
         
         return model
-        
 
     def initialize_weights(self):
         assert not hasattr(self, "llama")
