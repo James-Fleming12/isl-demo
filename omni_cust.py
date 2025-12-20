@@ -328,11 +328,14 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
                 if target_format == 'blocks_modulelist':
                     new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
+                    mapped_state_dict[new_key] = value
+                    block_name = f'block{block_idx + 1}'
+                    alt_key = f'llm.{block_name}.{new_idx}.{param_path}'
+                    mapped_state_dict[alt_key] = value
                 else:
                     block_name = f'block{block_idx + 1}'
                     new_key = f'llm.{block_name}.{new_idx}.{param_path}'
-                
-                mapped_state_dict[new_key] = value
+                    mapped_state_dict[new_key] = value
                 
             elif key.startswith('llm.'):
                 mapped_state_dict[key] = value
@@ -342,7 +345,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         mapped_layer_keys = [k for k in mapped_state_dict.keys() if 'llm.block' in k]
         if mapped_layer_keys:
             print(f"Sample mapped layer keys: {mapped_layer_keys[:5]}")
-        
+
         missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
         unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
         
@@ -375,7 +378,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 cache_dir=cache_folder, 
                 ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
             )
-        
         config = Phi3Config.from_pretrained(model_name)
         model = cls(config)
 
