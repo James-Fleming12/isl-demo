@@ -364,16 +364,16 @@ class QuarterBlockPhi3Transformer(QuarterBlockPhi3):
 
         layer_idx = -1
         for index, block in enumerate(self.blocks):
-            # if index > 0:
-            #     block_input_tokens = block_inputs[index-1]
-            #     if isinstance(num_tokens, list):
-            #         image_tokens = max(num_tokens)
-            #     else:
-            #         image_tokens = num_tokens
-            #     hidden_states = torch.cat([
-            #         hidden_states[:, :-image_tokens],
-            #         block_input_tokens
-            #     ], dim=1)
+            if index > 0:
+                block_input_tokens = block_inputs[index-1]
+                if isinstance(num_tokens, list):
+                    image_tokens = max(num_tokens)
+                else:
+                    image_tokens = num_tokens
+                hidden_states = torch.cat([
+                    hidden_states[:, :-image_tokens],
+                    block_input_tokens
+                ], dim=1)
             for layer in block:
                 layer_idx += 1
                 layer_outputs = layer(

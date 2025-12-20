@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from fm_noise_scheduler import FlowMatchEulerDiscreteScheduler
 
 from diffusers.models import AutoencoderKL
 from diffusers import StableDiffusionPipeline

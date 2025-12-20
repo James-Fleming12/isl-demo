@@ -66,22 +66,7 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
         axes[5].axis('off')
     
     plt.tight_layout()
-    plt.show()
-
-    fig2, axes2 = plt.subplots(1, 6, figsize=(20, 4))
-    
-    all_images = [img0] + normalized_blocks
-    if gt_img is not None:
-        all_images.append(gt_img)
-    
-    for i, (ax, img) in enumerate(zip(axes2, all_images)):
-        ax.imshow(img)
-        if i < len(titles):
-            ax.set_title(titles[i])
-        ax.axis('off')
-    
-    plt.tight_layout()
-    plt.show()
+    plt.savefig("inference_check.png")
 
 def inference_check(model: CustomOmniGen, data: DataLoader):
     num_layers = model.num_layers
@@ -157,18 +142,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     log_file = os.path.join("logs", f"log.txt")
     
-    config = Phi3Config(
-        hidden_size=1536,
-        intermediate_size=4096,
-        num_hidden_layers=16,
-        num_attention_heads=16,
-        num_key_value_heads=8
-    )
-    
-    model = CustomOmniGen(config)
-    model.to(device)
+    model = CustomOmniGen.from_pretrained("Shitao/OmniGen-v1")
     model.llm.config.use_cache = False
     model.llm.gradient_checkpointing_enable()
+    model.to(device)
     model.train()
     
     processor = OmniGenProcessor.from_pretrained("Shitao/OmniGen-v1")
@@ -201,11 +178,10 @@ def main():
             
             with torch.no_grad():
                 output_images = vae_encode_list(vae, output_images, model.llm.dtype)
-                output_images = [img * 0.18215 for img in output_images]
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:
                 padding_latent = [p.to(device=output_images[0].device) if p is not None else None for p in padding_latent]
-            
+
             model_kwargs = dict(
                 input_ids=data['input_ids'].to(device),
                 block_inputs=None,
@@ -233,16 +209,16 @@ def main():
         with open(log_file, 'a') as f:
             f.write(f"{epoch} {avg_loss}\n")
 
-        # if avg_loss < best_loss:
-        #     torch.save({
-        #         'epoch': epoch,
-        #         'model_state_dict': model.state_dict(),
-        #         'optimizer_state_dict': optimizer.state_dict(),
-        #         'loss': avg_loss,
-        #         'config': config,
-        #     }, 'omnigen_model.pth')
-        #     best_loss = avg_loss
-        #     print(f"Best model saved with loss: {avg_loss:.6f}")
+        if avg_loss < best_loss:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+                'config': config,
+            }, 'omnigen_model.pth')
+            best_loss = avg_loss
+            print(f"Best model saved with loss: {avg_loss:.6f}")
         
     inference_check(model, dataloader)
 

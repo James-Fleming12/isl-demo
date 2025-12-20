@@ -27,7 +27,7 @@ class JsonFolderDataset(Dataset):
         image_transform: optional transforms to apply to the images
         """
         samples_loaded = 1
-        max_samples = 2
+        max_samples = 1
 
         self.folder_path = folder_path
         self.processor = processor
