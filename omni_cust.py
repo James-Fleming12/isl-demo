@@ -269,14 +269,21 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         mapped_state_dict = {}
 
         target_format = None
+        has_blocks_modulelist = False
+        has_blocks_direct = False
+        
         for key in custom_state_dict.keys():
-            if key.startswith('llm.blocks.'):
-                target_format = 'blocks_modulelist'
-                break
-            elif key.startswith('llm.block1.') or key.startswith('llm.block2.') or \
-                key.startswith('llm.block3.') or key.startswith('llm.block4.'):
-                target_format = 'blocks_direct'
-                break
+            if 'llm.blocks.' in key and not has_blocks_modulelist:
+                parts = key.split('.')
+                if len(parts) >= 3 and parts[1] == 'blocks' and parts[2].isdigit():
+                    has_blocks_modulelist = True
+            elif any(f'llm.block{i}.' in key for i in range(1, 5)):
+                has_blocks_direct = True
+
+        if has_blocks_modulelist:
+            target_format = 'blocks_modulelist'
+        elif has_blocks_direct:
+            target_format = 'blocks_direct'
         
         if target_format is None:
             print("Warning: Could not determine target format from custom_state_dict")
@@ -332,21 +339,10 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             else:
                 mapped_state_dict[key] = value
 
-        missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
-        unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
-        
-        if missing_keys:
-            print(f"Warning: {len(missing_keys)} missing keys in mapped state dict")
-            print(f"First few missing keys: {list(missing_keys)[:5]}")
-        if unexpected_keys:
-            print(f"Warning: {len(unexpected_keys)} unexpected keys in mapped state dict")
-            print(f"First few unexpected keys: {list(unexpected_keys)[:5]}")
-        
         mapped_layer_keys = [k for k in mapped_state_dict.keys() if 'llm.block' in k]
         if mapped_layer_keys:
             print(f"Sample mapped layer keys: {mapped_layer_keys[:5]}")
         
-        # Verify all expected keys are present
         missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
         unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
         
@@ -358,7 +354,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             print(f"First few unexpected keys: {list(unexpected_keys)[:5]}")
         
         return mapped_state_dict
-
 
     @classmethod
     def from_pretrained_other(cls, model_name: str, map_llm_params: bool = True, strict: bool = True):
