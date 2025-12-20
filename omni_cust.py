@@ -197,68 +197,99 @@ class PatchEmbedMR(nn.Module):
         x = x.flatten(2).transpose(1, 2)  # NCHW -> NLC
         return x
 
-class CustomOmniGen(nn.Module, PeftAdapterMixin):
-    """
-    Diffusion model with a Transformer backbone.
-    """
-    def __init__(
-        self,
-        transformer_config: Phi3Config,
-        patch_size=2,
-        in_channels=4,
-        pe_interpolation: float = 1.0,
-        pos_embed_max_size: int = 192,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = in_channels
-        self.patch_size = patch_size
-        self.pos_embed_max_size = pos_embed_max_size
-
-        hidden_size = transformer_config.hidden_size
-
-        self.x_embedder = PatchEmbedMR(patch_size, in_channels, hidden_size, bias=True)
-        self.input_x_embedder = PatchEmbedMR(patch_size, in_channels, hidden_size, bias=True)
-
-        self.time_token = TimestepEmbedder(hidden_size)
-        self.t_embedder = TimestepEmbedder(hidden_size)
+    @staticmethod
+    def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Maps OmniGen checkpoint (with Phi3Model.layers) to CustomOmniGen 
+        (with QuarterBlockPhi3Transformer.block1/2/3/4).
         
-        self.pe_interpolation = pe_interpolation
-        pos_embed = get_2d_sincos_pos_embed(hidden_size, pos_embed_max_size, interpolation_scale=self.pe_interpolation, base_size=64)
-        self.register_buffer("pos_embed", torch.from_numpy(pos_embed).float().unsqueeze(0), persistent=True)
+        Args:
+            omni_state_dict: State dict from original OmniGen checkpoint
+            custom_state_dict: State dict from CustomOmniGen model (used for structure reference)
+        
+        Returns:
+            Mapped state dict compatible with CustomOmniGen
+        """
+        mapped_state_dict = {}
 
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        num_layers = None
+        for key in omni_state_dict.keys():
+            if key.startswith('llm.layers.'):
+                layer_idx = int(key.split('.')[2])
+                if num_layers is None or layer_idx >= num_layers:
+                    num_layers = layer_idx + 1
+        
+        if num_layers is None:
+            print("Could not determine number of layers, attempting direct mapping")
+            return omni_state_dict
+        
+        assert num_layers % 4 == 0, f"Number of layers ({num_layers}) must be divisible by 4"
+        
+        quarter = num_layers // 4
 
-        self.initialize_weights()
+        for key, value in omni_state_dict.items():
+            if key.startswith('llm.layers.'):
+                parts = key.split('.')
+                layer_idx = int(parts[2])
+                param_path = '.'.join(parts[3:])
 
-        self.llm = QuarterBlockPhi3Transformer(config=transformer_config)
-        self.llm.config.use_cache = False
+                if layer_idx < quarter:
+                    block_name = 'block1'
+                    new_idx = layer_idx
+                elif layer_idx < 2 * quarter:
+                    block_name = 'block2'
+                    new_idx = layer_idx - quarter
+                elif layer_idx < 3 * quarter:
+                    block_name = 'block3'
+                    new_idx = layer_idx - 2 * quarter
+                else:
+                    block_name = 'block4'
+                    new_idx = layer_idx - 3 * quarter
 
-        self.num_layers = transformer_config.num_hidden_layers + 1
-    
-    @classmethod
-    def from_pretrained(cls, model_name):
-        if not os.path.exists(model_name):
-            cache_folder = os.getenv('HF_HUB_CACHE')
-            model_name = snapshot_download(repo_id=model_name,
-                                           cache_dir=cache_folder,
-                                           ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
-        config = Phi3Config.from_pretrained(model_name)
-        model = cls(config)
-        if os.path.exists(os.path.join(model_name, 'model.safetensors')):
-            print("Loading safetensors")
-            ckpt = load_file(os.path.join(model_name, 'model.safetensors'))
-        else:
-            ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
-        model.load_state_dict(ckpt)
-        return model
-    
+                new_key = f'llm.{block_name}.{new_idx}.{param_path}'
+                mapped_state_dict[new_key] = value
+                
+            elif key.startswith('llm.'):
+                mapped_state_dict[key] = value
+            else:
+                mapped_state_dict[key] = value
+        
+        missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
+        unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
+        
+        if missing_keys:
+            print(f"Warning: Missing keys in mapped state dict: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in mapped state dict: {unexpected_keys}")
+        
+        return mapped_state_dict
+
     @classmethod
     def from_pretrained_other(cls, model_name: str, map_llm_params: bool = True, strict: bool = True):
+        """
+        Load OmniGen checkpoint into CustomOmniGen model.
+        
+        Args:
+            model_name: Path or repo ID of OmniGen model
+            map_llm_params: If True, map llm.layers to llm.blockN structure
+            strict: Whether to strictly enforce state dict key matching
+        
+        Returns:
+            CustomOmniGen model loaded with weights from OmniGen checkpoint
+        """
+        import os
+        from huggingface_hub import snapshot_download
+        from safetensors.torch import load_file
+        
         if not os.path.exists(model_name):
             cache_folder = os.getenv('HF_HUB_CACHE')
-            model_name = snapshot_download(repo_id=model_name, cache_dir=cache_folder, ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
+            model_name = snapshot_download(
+                repo_id=model_name, 
+                cache_dir=cache_folder, 
+                ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
+            )
 
+        from transformers import Phi3Config
         config = Phi3Config.from_pretrained(model_name)
         model = cls(config)
 
@@ -281,103 +312,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         
         return model
     
-    @staticmethod
-    def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Direct mapping based on QuarterBlockPhi3 structure.
-        
-        Maps: llm.layers.X.* -> llm.block{Y}.Z.*
-        where Y = 1-4 based on X // layers_per_block
-        and Z = X % layers_per_block
-        """
-        mapped_state_dict = {}
-
-        for key, value in omni_state_dict.items():
-            if not key.startswith('llm.'):
-                if key in custom_state_dict:
-                    mapped_state_dict[key] = value
-
-        for key, value in omni_state_dict.items():
-            if key.startswith('llm.') and 'layers.' not in key:
-                if key in custom_state_dict:
-                    mapped_state_dict[key] = value
-
-        layer_keys = [k for k in omni_state_dict.keys() if 'layers.' in k]
-        if not layer_keys:
-            return mapped_state_dict
-
-        import re
-        layer_indices = []
-        for key in layer_keys:
-            match = re.search(r'layers\.(\d+)\.', key)
-            if match:
-                layer_indices.append(int(match.group(1)))
-        
-        if not layer_indices:
-            return mapped_state_dict
-        
-        num_layers = max(layer_indices) + 1
-        layers_per_block = num_layers // 4
-        
-        print(f"Mapping {num_layers} OmniGen layers to 4 blocks with {layers_per_block} layers each")
-        
-        for omni_layer_idx in range(num_layers):
-            block_num = omni_layer_idx // layers_per_block + 1
-            block_pos = omni_layer_idx % layers_per_block
-            
-            block_name = f"block{block_num}"
-            
-            for key, value in omni_state_dict.items():
-                if f'layers.{omni_layer_idx}.' in key:
-                    new_key = key.replace(
-                        f'llm.layers.{omni_layer_idx}.',
-                        f'llm.{block_name}.{block_pos}.'
-                    )
-                    
-                    alt_key = key.replace(
-                        f'llm.layers.{omni_layer_idx}.',
-                        f'llm.blocks.{block_num-1}.{block_pos}.'
-                    )
-
-                    if new_key in custom_state_dict:
-                        mapped_state_dict[new_key] = value
-                    elif alt_key in custom_state_dict:
-                        mapped_state_dict[alt_key] = value
-                    else:
-                        simple_key = key.replace(
-                            f'layers.{omni_layer_idx}.',
-                            f'{block_name}.{block_pos}.'
-                        )
-                        if simple_key in custom_state_dict:
-                            mapped_state_dict[simple_key] = value
-                        else:
-                            mapped_state_dict[key] = value
-
-        required_keys = [
-            'llm.embed_tokens.weight',
-            'llm.norm.weight',
-            'x_embedder.proj.weight',
-            'x_embedder.proj.bias',
-            'input_x_embedder.proj.weight',
-            'input_x_embedder.proj.bias',
-            't_embedder.mlp.0.weight',
-            't_embedder.mlp.0.bias',
-            't_embedder.mlp.2.weight',
-            't_embedder.mlp.2.bias',
-            'time_token.mlp.0.weight',
-            'time_token.mlp.0.bias',
-            'time_token.mlp.2.weight',
-            'time_token.mlp.2.bias',
-            'final_layer.linear.weight',
-            'final_layer.linear.bias',
-        ]
-        
-        for key in required_keys:
-            if key not in mapped_state_dict and key in omni_state_dict:
-                mapped_state_dict[key] = omni_state_dict[key]
-
-        return mapped_state_dict
-
     def initialize_weights(self):
         assert not hasattr(self, "llama")
 
