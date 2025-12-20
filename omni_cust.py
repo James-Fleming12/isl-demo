@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from typing import Dict
+from typing import Any, Dict
 
 from diffusers.loaders import PeftAdapterMixin
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
@@ -252,6 +252,178 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
         model.load_state_dict(ckpt)
         return model
+    
+    @classmethod
+    def from_pretrained_other(cls, model_name: str, map_llm_params: bool = True, strict: bool = True):
+        if not os.path.exists(model_name):
+            cache_folder = os.getenv('HF_HUB_CACHE')
+            model_name = snapshot_download(repo_id=model_name, cache_die=cache_folder, ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
+
+        config = Phi3Config.from_pretrained(model_name)
+        model = cls(config)
+
+        if os.path.exists(os.path.join(model_name, 'model.safetensors')):
+            print("Loading safetensors from OmniGen snapshot")
+            ckpt = load_file(os.path.join(model_name, 'model.safetensors'))
+        else:
+            ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
+        
+        if not map_llm_params:
+            try:
+                model.load_state_dict(ckpt, strict=strict)
+            except RuntimeError as e:
+                print(f"Direct loading failed: {e}")
+                print("Try with map_llm_params=True to map transformer weights")
+                raise
+        else:
+            mapped_ckpt = cls._map_omni_to_custom_state_dict(ckpt, model.state_dict())
+            model.load_state_dict(mapped_ckpt, strict=strict)
+        
+        return model
+    
+    @staticmethod
+    def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Direct mapping based on QuarterBlockPhi3 structure.
+        
+        Maps: llm.layers.X.* -> llm.block{Y}.Z.*
+        where Y = 1-4 based on X // layers_per_block
+        and Z = X % layers_per_block
+        """
+        mapped_state_dict = {}
+
+        for key, value in omni_state_dict.items():
+            if not key.startswith('llm.'):
+                if key in custom_state_dict:
+                    mapped_state_dict[key] = value
+
+        for key, value in omni_state_dict.items():
+            if key.startswith('llm.') and 'layers.' not in key:
+                if key in custom_state_dict:
+                    mapped_state_dict[key] = value
+
+        layer_keys = [k for k in omni_state_dict.keys() if 'layers.' in k]
+        if not layer_keys:
+            return mapped_state_dict
+
+        import re
+        layer_indices = []
+        for key in layer_keys:
+            match = re.search(r'layers\.(\d+)\.', key)
+            if match:
+                layer_indices.append(int(match.group(1)))
+        
+        if not layer_indices:
+            return mapped_state_dict
+        
+        num_layers = max(layer_indices) + 1
+        layers_per_block = num_layers // 4
+        
+        print(f"Mapping {num_layers} OmniGen layers to 4 blocks with {layers_per_block} layers each")
+        
+        for omni_layer_idx in range(num_layers):
+            block_num = omni_layer_idx // layers_per_block + 1
+            block_pos = omni_layer_idx % layers_per_block
+            
+            block_name = f"block{block_num}"
+            
+            for key, value in omni_state_dict.items():
+                if f'layers.{omni_layer_idx}.' in key:
+                    new_key = key.replace(
+                        f'llm.layers.{omni_layer_idx}.',
+                        f'llm.{block_name}.{block_pos}.'
+                    )
+                    
+                    alt_key = key.replace(
+                        f'llm.layers.{omni_layer_idx}.',
+                        f'llm.blocks.{block_num-1}.{block_pos}.'
+                    )
+
+                    if new_key in custom_state_dict:
+                        mapped_state_dict[new_key] = value
+                    elif alt_key in custom_state_dict:
+                        mapped_state_dict[alt_key] = value
+                    else:
+                        simple_key = key.replace(
+                            f'layers.{omni_layer_idx}.',
+                            f'{block_name}.{block_pos}.'
+                        )
+                        if simple_key in custom_state_dict:
+                            mapped_state_dict[simple_key] = value
+                        else:
+                            mapped_state_dict[key] = value
+
+        required_keys = [
+            'llm.embed_tokens.weight',
+            'llm.norm.weight',
+            'x_embedder.proj.weight',
+            'x_embedder.proj.bias',
+            'input_x_embedder.proj.weight',
+            'input_x_embedder.proj.bias',
+            't_embedder.mlp.0.weight',
+            't_embedder.mlp.0.bias',
+            't_embedder.mlp.2.weight',
+            't_embedder.mlp.2.bias',
+            'time_token.mlp.0.weight',
+            'time_token.mlp.0.bias',
+            'time_token.mlp.2.weight',
+            'time_token.mlp.2.bias',
+            'final_layer.linear.weight',
+            'final_layer.linear.bias',
+        ]
+        
+        for key in required_keys:
+            if key not in mapped_state_dict and key in omni_state_dict:
+                mapped_state_dict[key] = omni_state_dict[key]
+
+        return mapped_state_dict
+    
+    @staticmethod
+    def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Map OmniGen state dict to CustomOmniGen state dict.
+        This handles the transformation from Phi3Transformer to QuarterBlockPhi3Transformer.
+        """
+        mapped_state_dict = {}
+        
+        for key, value in omni_state_dict.items():
+            if key.startswith('llm.'):
+                new_key = key
+                if '.mlp.' in key:
+                    # Example: Handle MLP layer differences
+                    # You might need to split or combine weights here
+                    pass
+                elif '.self_attn.' in key:
+                    # Example: Handle attention layer differences
+                    # QuarterBlock might have different attention structure
+                    pass
+                elif key.startswith('llm.layers.'):
+                    # Example: QuarterBlock might have 1/4 the layers
+                    # You might need to select which layers to copy or average
+                    # This is architecture-specific
+                    pass
+                
+                # For now, keep the same key structure assuming compatibility
+                # You'll need to customize this based on your QuarterBlockPhi3Transformer implementation
+                mapped_state_dict[new_key] = value
+            else:
+                # Copy non-llm weights directly (should be compatible)
+                mapped_state_dict[key] = value
+        
+        # Check for missing keys in custom model
+        custom_keys = set(custom_state_dict.keys())
+        mapped_keys = set(mapped_state_dict.keys())
+        
+        missing_keys = custom_keys - mapped_keys
+        unexpected_keys = mapped_keys - custom_keys
+        
+        if missing_keys:
+            print(f"Missing keys in mapped state dict: {missing_keys}")
+        if unexpected_keys:
+            print(f"Unexpected keys in mapped state dict: {unexpected_keys}")
+        
+        return mapped_state_dict
+
 
     def initialize_weights(self):
         assert not hasattr(self, "llama")

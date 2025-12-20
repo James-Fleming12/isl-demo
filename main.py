@@ -142,7 +142,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     log_file = os.path.join("logs", f"log.txt")
     
-    model = CustomOmniGen.from_pretrained("Shitao/OmniGen-v1")
+    model = CustomOmniGen.from_pretrained_other("Shitao/OmniGen-v1")
     model.llm.config.use_cache = False
     model.llm.gradient_checkpointing_enable()
     model.to(device)
