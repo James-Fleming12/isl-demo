@@ -342,7 +342,23 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             print(f"Warning: {len(unexpected_keys)} unexpected keys in mapped state dict")
             print(f"First few unexpected keys: {list(unexpected_keys)[:5]}")
         
+        mapped_layer_keys = [k for k in mapped_state_dict.keys() if 'llm.block' in k]
+        if mapped_layer_keys:
+            print(f"Sample mapped layer keys: {mapped_layer_keys[:5]}")
+        
+        # Verify all expected keys are present
+        missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
+        unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
+        
+        if missing_keys:
+            print(f"Warning: {len(missing_keys)} missing keys in mapped state dict")
+            print(f"First few missing keys: {list(missing_keys)[:5]}")
+        if unexpected_keys:
+            print(f"Warning: {len(unexpected_keys)} unexpected keys in mapped state dict")
+            print(f"First few unexpected keys: {list(unexpected_keys)[:5]}")
+        
         return mapped_state_dict
+
 
     @classmethod
     def from_pretrained_other(cls, model_name: str, map_llm_params: bool = True, strict: bool = True):
