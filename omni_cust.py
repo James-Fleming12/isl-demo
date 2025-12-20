@@ -288,21 +288,21 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 parts = key.split('.')
                 layer_idx = int(parts[2])
                 param_path = '.'.join(parts[3:])
-                
+
                 if layer_idx < quarter:
-                    block_idx = 0
+                    block_name = 'block1'
                     new_idx = layer_idx
                 elif layer_idx < 2 * quarter:
-                    block_idx = 1
+                    block_name = 'block2'
                     new_idx = layer_idx - quarter
                 elif layer_idx < 3 * quarter:
-                    block_idx = 2
+                    block_name = 'block3'
                     new_idx = layer_idx - 2 * quarter
                 else:
-                    block_idx = 3
+                    block_name = 'block4'
                     new_idx = layer_idx - 3 * quarter
 
-                new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
+                new_key = f'llm.{block_name}.{new_idx}.{param_path}'
                 mapped_state_dict[new_key] = value
                 
             elif key.startswith('llm.'):
@@ -345,7 +345,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
             )
         
-        from transformers import Phi3Config
         config = Phi3Config.from_pretrained(model_name)
         model = cls(config)
 
