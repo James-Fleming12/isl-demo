@@ -202,14 +202,6 @@ def main():
 
     deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
 
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-
-    model_engine, optimizer, _, _ = deepspeed.initialize(
-        args=args,
-        model=model,
-        model_parameters=trainable_params, # hopefully fixing a deepspeed error
-    )
-
     params_to_freeze = [ # freeizing params for deepspeed error
         'input_x_embedder.proj.weight',
         'input_x_embedder.proj.bias',
