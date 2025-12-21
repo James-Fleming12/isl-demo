@@ -272,11 +272,7 @@ def main():
                 f.write(f"{epoch} {avg_loss}\n")
 
     if local_rank == 0:
-        torch.save({
-            'model_state_dict': model_engine.module.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': avg_loss,
-        }, f'models/final_model_epoch_{epoch}.pth')
+        torch.save(model_engine.module.state_dict(), f'models/final_model_epoch_{epoch}.pth')
         print(f"Final model saved with loss: {avg_loss:.6f}")
         model_engine.module.eval()
         with torch.no_grad():
