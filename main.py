@@ -43,16 +43,11 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
     axes[0].set_title(titles[0])
     axes[0].axis('off')
 
-    normalized_blocks = []
     for i, block_img in enumerate(block_outputs):
         if isinstance(block_img, list):
             img = block_img[0].detach().squeeze().permute(1, 2, 0).cpu().numpy()
         else:
             img = block_img[0].detach().squeeze().permute(1, 2, 0).cpu().numpy()
-        
-        # Normalize
-        img = (img - img.min()) / (img.max() - img.min())
-        normalized_blocks.append(img)
         
         axes[i+1].imshow(img)
         axes[i+1].set_title(titles[i+1])
