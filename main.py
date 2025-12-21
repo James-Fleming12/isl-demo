@@ -4,7 +4,6 @@ from matplotlib import pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as T
 from torchvision import transforms
 
 import argparse
