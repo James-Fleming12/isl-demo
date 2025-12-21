@@ -198,7 +198,6 @@ def main():
         args=args,
         model=model,
         model_parameters=model.parameters(),
-        config=deepspeed_config
     )
     
     for epoch in range(epochs):
