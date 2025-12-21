@@ -210,51 +210,53 @@ def main():
         model_parameters=trainable_params, # hopefully fixing a deepspeed error
     )
 
-    # After deepspeed.initialize(), before training loop
     print("\n=== Checking parameters in computational graph ===")
 
-    # Create dummy inputs matching your model's requirements
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    batch_size = 2  # Small batch for testing
-
-    # Adjust these dimensions based on your actual model config
-    seq_len = 128  # Adjust to your typical sequence length
-    vocab_size = 50000  # Adjust to your tokenizer vocab size
-    num_image_tokens = 256  # Adjust based on your image tokenization
-    img_latent_dim = 768  # Adjust to your image latent dimension
-    max_img_size = 1024  # Adjust to your max image size
-
-    # Create dummy x1 (this is what gets passed to isl_training_losses)
-    # Based on your loss function, x1 seems to be image latents
-    dummy_x1 = torch.randn(batch_size, img_latent_dim, 32, 32, device=device)  # Adjust H, W
-
-    # Create dummy model_kwargs with all required inputs
-    dummy_model_kwargs = {
-        'input_ids': torch.randint(0, vocab_size, (batch_size, seq_len), device=device),
-        'input_img_latents': torch.randn(batch_size, num_image_tokens, img_latent_dim, device=device),
-        'input_image_sizes': torch.tensor([[512, 512], [768, 768]], device=device),  # Adjust sizes
-        'attention_mask': torch.ones(batch_size, seq_len, device=device),
-        'position_ids': torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1),
-    }
-
-    # Set model to train mode
     model_engine.train()
 
-    # Do a forward pass with gradient tracking
     try:
-        dummy_loss_dict = isl_training_losses(
+        first_batch = next(iter(dataloader))
+        
+        output_images = [img.to(device) for img in first_batch['output_images']]
+        
+        with torch.no_grad():
+            output_images = vae_encode_list(vae, output_images, model.llm.dtype)
+
+        model_dtype = next(model_engine.parameters()).dtype
+        output_images = [img.to(model_dtype) for img in output_images]
+
+        padding_latent = first_batch.get("padding_images", None)
+        if padding_latent is not None:
+            padding_latent = [p.to(device=output_images[0].device) if p is not None else None for p in padding_latent]
+
+        model_kwargs = dict(
+            input_ids=first_batch['input_ids'].to(device),
+            block_inputs=None,
+            input_img_latents=None,
+            input_image_sizes=first_batch['input_image_sizes'],
+            attention_mask=first_batch['attention_mask'].to(device),
+            position_ids=first_batch['position_ids'].to(device),
+            padding_latent=padding_latent,
+            past_key_values=None,
+            return_past_key_values=False
+        )
+        
+        print(f"✅ Got first batch, output_images shapes: {[img.shape for img in output_images]}")
+        
+        # Run your actual loss function
+        loss_dict = isl_training_losses(
             model=model_engine,
-            x1=dummy_x1,
-            model_kwargs=dummy_model_kwargs,
+            x1=output_images,
+            model_kwargs=model_kwargs,
             snr_type='uniform',
             patch_weight=None
         )
-        dummy_loss = dummy_loss_dict['loss']
+        loss = loss_dict['loss']
         
-        print(f"✅ Forward pass successful! Loss: {dummy_loss.item():.4f}")
+        print(f"✅ Forward pass successful! Loss: {loss.item():.4f}")
         
         # Try backward to see which parameters get gradients
-        model_engine.backward(dummy_loss)
+        model_engine.backward(loss)
         
         print("\n=== Checking which parameters received gradients ===")
         no_grad_params = []
@@ -274,12 +276,10 @@ def main():
         
         if no_grad_params:
             print(f"\n❌ Found {len(no_grad_params)} parameters without gradients!")
-            print("\n🔧 Add this code before deepspeed.initialize():")
+            print("\n🔧 Add this code BEFORE model_engine initialization:")
             print("\nparams_to_freeze = [")
-            for name, shape in no_grad_params[:10]:  # Show first 10
+            for name, shape in no_grad_params:
                 print(f"    '{name}',")
-            if len(no_grad_params) > 10:
-                print(f"    # ... and {len(no_grad_params) - 10} more")
             print("]\n")
             print("for name, param in model.named_parameters():")
             print("    if any(freeze_name in name for freeze_name in params_to_freeze):")
@@ -291,14 +291,9 @@ def main():
         model_engine.module.zero_grad()
         
     except Exception as e:
-        print(f"\n❌ Error during diagnostic forward/backward: {e}")
+        print(f"\n❌ Error during diagnostic: {e}")
         import traceback
         traceback.print_exc()
-        
-        print("\n💡 You need to adjust the dummy input dimensions.")
-        print("Please provide:")
-        print("  1. What's the shape of x1 in your actual training data?")
-        print("  2. What are the typical values for seq_len, vocab_size, etc?")
 
     print("\n=== Diagnostic complete ===\n")
 
