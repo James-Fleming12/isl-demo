@@ -1,19 +1,36 @@
 import torch
+import os
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from diffusers.models import AutoencoderKL
+
+from omni_cust import CustomOmniGen, JsonFolderDataset
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
-from omni_cust import CustomOmniGen, JsonFolderDataset
-from main import inference_check, visualize_block_progression
 
-from torchvision import transforms
+from main import visualize_block_progression, inference_check
 
-from torch.utils.data import DataLoader
+def convert_checkpoint_to_pretrained_format(checkpoint_path, output_dir):
+    """
+    Convert a training checkpoint to the format expected by from_pretrained
+    """
+    print(f"Converting checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    model_state_dict = checkpoint['model_state_dict']
+
+    torch.save(model_state_dict, os.path.join(output_dir, 'model.pt'))
 
 def main():
+    checkpoint_path = "models/best_model_epoch_299.pth"
+    converted_model_dir = "models"
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    if not os.path.exists(os.path.join(converted_model_dir, 'model.pt')):
+        convert_checkpoint_to_pretrained_format(checkpoint_path, converted_model_dir)
 
-    model_path = "models/final_model_epoch_299.pth"
-    model = CustomOmniGen.from_pretrained()
-
+    model = CustomOmniGen.from_pretrained(converted_model_dir)
+    
     params_to_freeze = [
         'input_x_embedder.proj.weight',
         'input_x_embedder.proj.bias',
@@ -21,15 +38,10 @@ def main():
     
     for name, param in model.named_parameters():
         if any(freeze_name in name for freeze_name in params_to_freeze):
-            print(f'Freezing: {name}')
             param.requires_grad = False
     
     model.to(device)
     model.eval()
-
-    checkpoint = torch.load(model_path, map_location=device)
-
-    model.load_state_dict(checkpoint['model_state_dict'])
 
     processor = OmniGenProcessor.from_pretrained("Shitao/OmniGen-v1")
     
@@ -45,9 +57,9 @@ def main():
         keep_raw_resolution=True
     )
     dataloader = DataLoader(dataset, batch_size=1, collate_fn=collate_fn, shuffle=False)
-
+    
     with torch.no_grad():
         inference_check(model, dataloader, device=device)
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
