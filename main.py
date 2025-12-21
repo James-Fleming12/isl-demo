@@ -264,22 +264,22 @@ def main():
             num_batches += 1
 
         avg_loss = total_loss / num_batches
+
         if local_rank == 0:
-                print(f"Epoch {epoch} Loss: {avg_loss}")
-                with open(log_file, 'a') as f:
-                    f.write(f"{epoch} {avg_loss}\n")
+            print(f"Epoch {epoch} Loss: {avg_loss}")
+            with open(log_file, 'a') as f:
+                f.write(f"{epoch} {avg_loss}\n")
 
-                if avg_loss < best_loss:
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model_engine.module.state_dict(),
-                        'loss': avg_loss,
-                    }, 'omnigen_model.pth')
-                    best_loss = avg_loss
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model_engine.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': avg_loss,
+                }, f'checkpoints/best_model_epoch_{epoch}.pth')
+                print(f"Best model saved with loss: {avg_loss:.6f}")
 
-                    model_engine.save_checkpoint("checkpoints", tag=f"epoch_{epoch}")
-                    print(f"Best model saved with loss: {avg_loss:.6f}")
-        
     if local_rank == 0:
         inference_check(model_engine.module, dataloader, device=device)
 
