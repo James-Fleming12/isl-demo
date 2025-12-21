@@ -159,7 +159,15 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     
-    model = CustomOmniGen.from_pretrained_other("Shitao/OmniGen-v1")
+    # model = CustomOmniGen.from_pretrained_other("Shitao/OmniGen-v1")
+    config = Phi3Config(
+        hidden_size=1536,
+        intermediate_size=4096,
+        num_hidden_layers=16,
+        num_attention_heads=16,
+        num_key_value_heads=8
+    )
+    model = CustomOmniGen(config)
     model.llm.config.use_cache = False
     model.llm.gradient_checkpointing_enable()
     model.to(device)
@@ -201,6 +209,63 @@ def main():
         model=model,
         model_parameters=trainable_params, # hopefully fixing a deepspeed error
     )
+
+    # After deepspeed.initialize(), before training loop
+    print("\n=== Checking parameters in computational graph ===")
+
+    # Create dummy inputs matching your training function
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    batch_size = 2  # Small batch for testing
+
+    # Create dummy x1 - adjust shape based on your actual data
+    # Common shapes: [B, C, H, W] for images
+    dummy_x1 = torch.randn(batch_size, 3, 224, 224, device=device)  # Adjust C, H, W as needed
+
+    # Create dummy model_kwargs if you use them
+    dummy_model_kwargs = {}  # Add any keys your model expects
+
+    # Set model to train mode
+    model_engine.train()
+
+    # Do a forward pass with gradient tracking
+    try:
+        dummy_loss_dict = isl_training_losses(
+            model=model_engine,
+            x1=dummy_x1,
+            model_kwargs=dummy_model_kwargs,
+            snr_type='uniform',
+            patch_weight=None
+        )
+        dummy_loss = dummy_loss_dict['loss']
+        
+        # Try backward to see which parameters get gradients
+        model_engine.backward(dummy_loss)
+        
+        print("\n=== Checking which parameters received gradients ===")
+        no_grad_params = []
+        for name, param in model_engine.module.named_parameters():
+            if param.requires_grad:
+                if param.grad is None:
+                    no_grad_params.append((name, param.shape))
+                    print(f"⚠️  NO GRADIENT: {name}, shape={param.shape}")
+        
+        if no_grad_params:
+            print(f"\n❌ Found {len(no_grad_params)} parameters without gradients!")
+            print("\nThese parameters should be frozen:")
+            for name, shape in no_grad_params:
+                print(f"  - {name}")
+        else:
+            print("\n✅ All trainable parameters received gradients!")
+        
+        # Clear gradients after diagnostic
+        model_engine.module.zero_grad()
+        
+    except Exception as e:
+        print(f"\n❌ Error during diagnostic forward/backward: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n=== Diagnostic complete ===\n")
     
     for epoch in range(epochs):
         total_loss = 0.0
