@@ -147,7 +147,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
 def main():
     batch_size = 1
     lr = 1e-4
-    epochs = 100
+    epochs = 300
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = argparse.ArgumentParser()
@@ -272,21 +272,16 @@ def main():
             with open(log_file, 'a') as f:
                 f.write(f"{epoch} {avg_loss}\n")
 
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model_engine.module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'loss': avg_loss,
-                }, f'checkpoints/best_model_epoch_{epoch}.pth')
-                print(f"Best model saved with loss: {avg_loss:.6f}")
-
     if local_rank == 0:
+        torch.save({
+            'model_state_dict': model_engine.module.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': avg_loss,
+        }, f'models/final_model_epoch_{epoch}.pth')
+        print(f"Final model saved with loss: {avg_loss:.6f}")
         model_engine.module.eval()
         with torch.no_grad():
             inference_check(model_engine.module, dataloader, device=device)
-
 
 if __name__=="__main__":
     main()
