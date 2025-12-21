@@ -1,3 +1,4 @@
+import json
 import os
 from matplotlib import pyplot as plt
 import torch
@@ -6,7 +7,10 @@ from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms as T
 from torchvision import transforms
 
+import argparse
+
 from diffusers.models import AutoencoderKL
+from torch.utils.data.distributed import DistributedSampler
 
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 
@@ -14,6 +18,8 @@ from omni_cust import CustomOmniGen, JsonFolderDataset, isl_training_losses
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.utils import vae_encode, vae_encode_list
 from transformers import Phi3Config
+
+import deepspeed
 
 def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, titles=None):
     """
@@ -68,10 +74,11 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
     plt.tight_layout()
     plt.savefig("inference_check.png")
 
-def inference_check(model: CustomOmniGen, data: DataLoader):
+def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     num_layers = model.num_layers
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     batch = next(iter(data))
     output_image = [img.to(device) for img in batch['output_images']]
@@ -139,8 +146,18 @@ def main():
     batch_size = 1
     lr = 1e-4
     epochs = 50
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    log_file = os.path.join("logs", f"log.txt")
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local_rank", type=int, default=-1)
+    parser.add_argument("--deepspeed_config", type=str, default="ds_config.json")
+    args = parser.parse_args()
+
+    deepspeed.init_distributed()
+
+    local_rank = args.local_rank
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
     
     model = CustomOmniGen.from_pretrained_other("Shitao/OmniGen-v1")
     model.llm.config.use_cache = False
@@ -152,7 +169,7 @@ def main():
     vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
     vae.eval()
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
     image_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -160,19 +177,36 @@ def main():
     ])
     
     dataset = JsonFolderDataset("00000", processor, image_transform, small_subset=True)
+    sampler = DistributedSampler(dataset)
     collate_fn = TrainDataCollator(
         pad_token_id=processor.text_tokenizer.eos_token_id,
         hidden_size=model.llm.config.hidden_size,
         keep_raw_resolution=True
     )
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
     
-    best_loss = float('inf')
+    if local_rank == 0:
+        best_loss = float('inf')
+        log_file = os.path.join("logs", f"log.txt")
+
+    with open(args.deepspeed_config, 'r') as f:
+        deepspeed_config = json.load(f)
+
+    deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
+
+    model_engine, optimizer, _, _ = deepspeed.initialize(
+        args=args,
+        model=model,
+        model_parameters=model.parameters(),
+        config=deepspeed_config
+    )
     
     for epoch in range(epochs):
         total_loss = 0.0
         num_batches = 0
         
+        dataloader.sampler.set_epoch(epoch)
+
         for batch_idx, data in enumerate(dataloader):
             output_images = [img.to(device) for img in data['output_images']]
             
@@ -194,33 +228,38 @@ def main():
                 return_past_key_values=False
             )
             
-            loss_dict = isl_training_losses(model, output_images, model_kwargs=model_kwargs)
+            loss_dict = isl_training_losses(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            model_engine.backward(loss)
+            model_engine.step()
 
-            total_loss += loss.item()
+            loss_tensor = torch.tensor([loss.item()], device=device)
+            torch.distributed.all_reduce(loss_tensor)
+            avg_loss_across = loss_tensor.item() / torch.distributed.get_world_size()
+
+            total_loss += avg_loss_across
             num_batches += 1
 
         avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch} Loss: {avg_loss}")
-        with open(log_file, 'a') as f:
-            f.write(f"{epoch} {avg_loss}\n")
+        if local_rank == 0:
+                print(f"Epoch {epoch} Loss: {avg_loss}")
+                with open(log_file, 'a') as f:
+                    f.write(f"{epoch} {avg_loss}\n")
 
-        if avg_loss < best_loss:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-                'config': config,
-            }, 'omnigen_model.pth')
-            best_loss = avg_loss
-            print(f"Best model saved with loss: {avg_loss:.6f}")
+                if avg_loss < best_loss:
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': model_engine.module.state_dict(),
+                        'loss': avg_loss,
+                    }, 'omnigen_model.pth')
+                    best_loss = avg_loss
+
+                    model_engine.save_checkpoint("checkpoints", tag=f"epoch_{epoch}")
+                    print(f"Best model saved with loss: {avg_loss:.6f}")
         
-    inference_check(model, dataloader)
+    if local_rank == 0:
+        inference_check(model_engine.module, dataloader, device=device)
 
 if __name__=="__main__":
     main()

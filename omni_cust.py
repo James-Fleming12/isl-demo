@@ -719,10 +719,10 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         
         return torch.cat(model_out, dim=0), pask_key_values
     
-def isl_training_losses(model: CustomOmniGen, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """Loss for training the score model
     Args:
-    - model: backbone model; could be score, noise, or velocity
+    - model: DeepSpeed Model Engine
     - x1: clean datapoint (can be list of tensors or tensor)
     - model_kwargs: additional arguments for torch model
     
@@ -753,7 +753,7 @@ def isl_training_losses(model: CustomOmniGen, x1, model_kwargs=None, snr_type='u
 
     xt = t.view(-1, 1, 1, 1) * x0 + (1 - t.view(-1, 1, 1, 1)) * x1
     
-    num_layers = model.num_layers
+    num_layers = model.module.num_layers # changed for deepspeed
     intermediate_noise_levels = [0.75, 0.5, 0.25]
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
 
