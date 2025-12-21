@@ -343,8 +343,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 mapped_state_dict[key] = value
 
         mapped_layer_keys = [k for k in mapped_state_dict.keys() if 'llm.block' in k]
-        if mapped_layer_keys:
-            print(f"Sample mapped layer keys: {mapped_layer_keys[:5]}")
 
         missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
         unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
