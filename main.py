@@ -117,17 +117,17 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     with torch.no_grad():
         for idx in intermediate_layer_indices:
             decoded = vae.decode(
-                hidden_states[idx] / vae.config.scaling_factor
+                hidden_states[idx].float() / vae.config.scaling_factor
             ).sample
             decoded_blocks.append(decoded)
 
         final_decoded = vae.decode(
-            model_output / vae.config.scaling_factor
+            model_output.float() / vae.config.scaling_factor
         ).sample
         decoded_blocks.append(final_decoded)
 
         decoded_noise = vae.decode(
-            model_input / vae.config.scaling_factor
+            model_input.float() / vae.config.scaling_factor
         ).sample
 
     visualize_block_progression(
