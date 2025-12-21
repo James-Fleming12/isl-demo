@@ -213,16 +213,29 @@ def main():
     # After deepspeed.initialize(), before training loop
     print("\n=== Checking parameters in computational graph ===")
 
-    # Create dummy inputs matching your training function
+    # Create dummy inputs matching your model's requirements
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     batch_size = 2  # Small batch for testing
 
-    # Create dummy x1 - adjust shape based on your actual data
-    # Common shapes: [B, C, H, W] for images
-    dummy_x1 = torch.randn(batch_size, 3, 224, 224, device=device)  # Adjust C, H, W as needed
+    # Adjust these dimensions based on your actual model config
+    seq_len = 128  # Adjust to your typical sequence length
+    vocab_size = 50000  # Adjust to your tokenizer vocab size
+    num_image_tokens = 256  # Adjust based on your image tokenization
+    img_latent_dim = 768  # Adjust to your image latent dimension
+    max_img_size = 1024  # Adjust to your max image size
 
-    # Create dummy model_kwargs if you use them
-    dummy_model_kwargs = {}  # Add any keys your model expects
+    # Create dummy x1 (this is what gets passed to isl_training_losses)
+    # Based on your loss function, x1 seems to be image latents
+    dummy_x1 = torch.randn(batch_size, img_latent_dim, 32, 32, device=device)  # Adjust H, W
+
+    # Create dummy model_kwargs with all required inputs
+    dummy_model_kwargs = {
+        'input_ids': torch.randint(0, vocab_size, (batch_size, seq_len), device=device),
+        'input_img_latents': torch.randn(batch_size, num_image_tokens, img_latent_dim, device=device),
+        'input_image_sizes': torch.tensor([[512, 512], [768, 768]], device=device),  # Adjust sizes
+        'attention_mask': torch.ones(batch_size, seq_len, device=device),
+        'position_ids': torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1),
+    }
 
     # Set model to train mode
     model_engine.train()
@@ -238,22 +251,39 @@ def main():
         )
         dummy_loss = dummy_loss_dict['loss']
         
+        print(f"✅ Forward pass successful! Loss: {dummy_loss.item():.4f}")
+        
         # Try backward to see which parameters get gradients
         model_engine.backward(dummy_loss)
         
         print("\n=== Checking which parameters received gradients ===")
         no_grad_params = []
+        has_grad_count = 0
+        
         for name, param in model_engine.module.named_parameters():
             if param.requires_grad:
                 if param.grad is None:
                     no_grad_params.append((name, param.shape))
                     print(f"⚠️  NO GRADIENT: {name}, shape={param.shape}")
+                else:
+                    has_grad_count += 1
+        
+        print(f"\n📊 Summary:")
+        print(f"  - Parameters with gradients: {has_grad_count}")
+        print(f"  - Parameters WITHOUT gradients: {len(no_grad_params)}")
         
         if no_grad_params:
             print(f"\n❌ Found {len(no_grad_params)} parameters without gradients!")
-            print("\nThese parameters should be frozen:")
-            for name, shape in no_grad_params:
-                print(f"  - {name}")
+            print("\n🔧 Add this code before deepspeed.initialize():")
+            print("\nparams_to_freeze = [")
+            for name, shape in no_grad_params[:10]:  # Show first 10
+                print(f"    '{name}',")
+            if len(no_grad_params) > 10:
+                print(f"    # ... and {len(no_grad_params) - 10} more")
+            print("]\n")
+            print("for name, param in model.named_parameters():")
+            print("    if any(freeze_name in name for freeze_name in params_to_freeze):")
+            print("        param.requires_grad = False")
         else:
             print("\n✅ All trainable parameters received gradients!")
         
@@ -264,9 +294,14 @@ def main():
         print(f"\n❌ Error during diagnostic forward/backward: {e}")
         import traceback
         traceback.print_exc()
+        
+        print("\n💡 You need to adjust the dummy input dimensions.")
+        print("Please provide:")
+        print("  1. What's the shape of x1 in your actual training data?")
+        print("  2. What are the typical values for seq_len, vocab_size, etc?")
 
     print("\n=== Diagnostic complete ===\n")
-    
+
     for epoch in range(epochs):
         total_loss = 0.0
         num_batches = 0
