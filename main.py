@@ -253,6 +253,16 @@ def main():
             loss_dict = isl_training_losses(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
+            if epoch == 0 and batch_idx == 0 and local_rank == 0:
+                for name, param in model_engine.module.named_parameters():
+                    if param.requires_grad:
+                        try:
+                            _ = param.view_as(param).grad_fn
+                            print(f"Has Grad_FN {name}")
+                        except AttributeError:
+                            print(f"X NO GRAD_FN: {name}")
+                print("=== Starting backward ===\n")
+
             model_engine.backward(loss)
             model_engine.step()
 
