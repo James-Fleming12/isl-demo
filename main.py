@@ -102,13 +102,15 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
     vae.eval()
     
+    model_dtype = next(model.parameters()).dtype
+    
     with torch.no_grad():
         gt_latent = vae.encode(output_image).latent_dist.sample()
         gt_latent_scaled = gt_latent * vae.config.scaling_factor
 
-    model_input = torch.randn_like(gt_latent_scaled)
-    
-    model_output, hidden_states = model.inference(model_input, torch.ones(1, device=device), **model_kwargs)
+    model_input = torch.randn_like(gt_latent_scaled).to(model_dtype)
+
+    model_output, hidden_states = model.inference(model_input, torch.ones(1, device=device, dtype=model_dtype), **model_kwargs)
 
     decoded_blocks = []
 
@@ -145,7 +147,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
 def main():
     batch_size = 1
     lr = 1e-4
-    epochs = 50
+    epochs = 100
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = argparse.ArgumentParser()
@@ -281,7 +283,10 @@ def main():
                 print(f"Best model saved with loss: {avg_loss:.6f}")
 
     if local_rank == 0:
-        inference_check(model_engine.module, dataloader, device=device)
+        model_engine.module.eval()
+        with torch.no_grad():
+            inference_check(model_engine.module, dataloader, device=device)
+
 
 if __name__=="__main__":
     main()
