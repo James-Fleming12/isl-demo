@@ -210,92 +210,22 @@ def main():
         model_parameters=trainable_params, # hopefully fixing a deepspeed error
     )
 
-    print("\n=== Checking parameters in computational graph ===")
+    params_to_freeze = [ # freeizing params for deepspeed error
+        'input_x_embedder.proj.weight',
+        'input_x_embedder.proj.bias',
+    ]
 
-    model_engine.train()
+    for name, param in model.named_parameters():
+        if any(freeze_name in name for freeze_name in params_to_freeze):
+            param.requires_grad = False
 
-    try:
-        first_batch = next(iter(dataloader))
-        
-        output_images = [img.to(device) for img in first_batch['output_images']]
-        
-        with torch.no_grad():
-            output_images = vae_encode_list(vae, output_images, model.llm.dtype)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-        model_dtype = next(model_engine.parameters()).dtype
-        output_images = [img.to(model_dtype) for img in output_images]
-
-        padding_latent = first_batch.get("padding_images", None)
-        if padding_latent is not None:
-            padding_latent = [p.to(device=output_images[0].device) if p is not None else None for p in padding_latent]
-
-        model_kwargs = dict(
-            input_ids=first_batch['input_ids'].to(device),
-            block_inputs=None,
-            input_img_latents=None,
-            input_image_sizes=first_batch['input_image_sizes'],
-            attention_mask=first_batch['attention_mask'].to(device),
-            position_ids=first_batch['position_ids'].to(device),
-            padding_latent=padding_latent,
-            past_key_values=None,
-            return_past_key_values=False
-        )
-        
-        print(f"✅ Got first batch, output_images shapes: {[img.shape for img in output_images]}")
-        
-        # Run your actual loss function
-        loss_dict = isl_training_losses(
-            model=model_engine,
-            x1=output_images,
-            model_kwargs=model_kwargs,
-            snr_type='uniform',
-            patch_weight=None
-        )
-        loss = loss_dict['loss']
-        
-        print(f"✅ Forward pass successful! Loss: {loss.item():.4f}")
-        
-        # Try backward to see which parameters get gradients
-        model_engine.backward(loss)
-        
-        print("\n=== Checking which parameters received gradients ===")
-        no_grad_params = []
-        has_grad_count = 0
-        
-        for name, param in model_engine.module.named_parameters():
-            if param.requires_grad:
-                if param.grad is None:
-                    no_grad_params.append((name, param.shape))
-                    print(f"⚠️  NO GRADIENT: {name}, shape={param.shape}")
-                else:
-                    has_grad_count += 1
-        
-        print(f"\n📊 Summary:")
-        print(f"  - Parameters with gradients: {has_grad_count}")
-        print(f"  - Parameters WITHOUT gradients: {len(no_grad_params)}")
-        
-        if no_grad_params:
-            print(f"\n❌ Found {len(no_grad_params)} parameters without gradients!")
-            print("\n🔧 Add this code BEFORE model_engine initialization:")
-            print("\nparams_to_freeze = [")
-            for name, shape in no_grad_params:
-                print(f"    '{name}',")
-            print("]\n")
-            print("for name, param in model.named_parameters():")
-            print("    if any(freeze_name in name for freeze_name in params_to_freeze):")
-            print("        param.requires_grad = False")
-        else:
-            print("\n✅ All trainable parameters received gradients!")
-        
-        # Clear gradients after diagnostic
-        model_engine.module.zero_grad()
-        
-    except Exception as e:
-        print(f"\n❌ Error during diagnostic: {e}")
-        import traceback
-        traceback.print_exc()
-
-    print("\n=== Diagnostic complete ===\n")
+    model_engine, optimizer, _, _ = deepspeed.initialize(
+        args=args,
+        model=model,
+        model_parameters=trainable_params,
+    )
 
     for epoch in range(epochs):
         total_loss = 0.0
