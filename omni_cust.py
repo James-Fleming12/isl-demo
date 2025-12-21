@@ -752,6 +752,13 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     t = torch.ones(B).to(device)
 
     xt = t.view(-1, 1, 1, 1) * x0 + (1 - t.view(-1, 1, 1, 1)) * x1
+
+    model_dtype = next(model.parameters()).dtype
+
+    xt = xt.to(model_dtype)
+    x0 = x0.to(model_dtype)
+    x1 = x1.to(model_dtype)
+    t = t.to(model_dtype)
     
     num_layers = model.module.num_layers # changed for deepspeed
     intermediate_noise_levels = [0.75, 0.5, 0.25]

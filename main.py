@@ -211,6 +211,10 @@ def main():
             
             with torch.no_grad():
                 output_images = vae_encode_list(vae, output_images, model.llm.dtype)
+
+            model_dtype = next(model_engine.parameters()).dtype
+            output_images = [img.to(model_dtype) for img in output_images]
+
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:
                 padding_latent = [p.to(device=output_images[0].device) if p is not None else None for p in padding_latent]
