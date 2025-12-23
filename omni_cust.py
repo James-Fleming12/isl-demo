@@ -748,8 +748,8 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     
     device = x1.device
 
-    # t = sample_timestep(x1)
-    t = torch.ones(B).to(device)
+    t = sample_timestep(x1)
+    # t = torch.ones(B).to(device)
 
     xt = t.view(-1, 1, 1, 1) * x0 + (1 - t.view(-1, 1, 1, 1)) * x1
 
@@ -766,7 +766,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
     layer_targets = []
     for noise_level in intermediate_noise_levels:
-        target = noise_level * x0 + (1 - noise_level) * x1
+        target = (noise_level * t) * x0 + (1 - noise_level * t) * x1
         layer_targets.append(target)
     
     model_kwargs["block_inputs"] = layer_targets
@@ -783,7 +783,9 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     total_loss = 0.0
 
     for index, i in enumerate(intermediate_layer_indices):
-        layer_target = intermediate_noise_levels[index] * x0 + (1 - intermediate_noise_levels[index]) * x1
+        noise_level = intermediate_noise_levels[index]
+        layer_t = noise_level * t
+        layer_target = layer_t.view(-1, 1, 1, 1) * x0 + (1 - layer_t.view(-1, 1, 1, 1)) * x1
         
         hidden_state = hidden_states[i]
         if isinstance(hidden_state, list):
