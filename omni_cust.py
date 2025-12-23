@@ -768,6 +768,9 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         num_blocks = 4
         block_indices = [self.num_layers//4, self.num_layers//2, self.num_layers*3//4, -1]
         intermediate_results = []
+
+        dt = 1.0 / num_blocks
+
         for block_idx, layer_idx in enumerate(block_indices):
             if layer_idx == -1:
                 velocity_pred = final_pred
@@ -777,9 +780,9 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             if guidance_scale > 1.0:
                 pass
             if isinstance(current, list):
-                current = [velocity_pred[i] for i in range(len(current))]
+                current = [current[i] + dt * velocity_pred[i] for i in range(len(current))]
             else:
-                current = velocity_pred
+                current = current + dt * velocity_pred
 
             intermediate_results.append(deepcopy(current))
         
@@ -831,13 +834,6 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     # intermediate_noise_levels = [0.25, 0.5, 0.75]
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
 
-    # layer_targets = []
-    # for noise_level in intermediate_noise_levels:
-    #     target = (noise_level * t) * x0 + (1 - noise_level * t) * x1
-    #     layer_targets.append(target)
-    
-    # model_kwargs["block_inputs"] = layer_targets
-    
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
     if isinstance(model_output, list):
@@ -871,12 +867,12 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
         if patch_weight is not None:
             layer_loss = torch.stack(
-                [((ut[i] * 0.25 - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+                [((ut[i] - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
                 dim=0,
             )
         else:
             layer_loss = torch.stack(
-                [((ut[i] * 0.25 - hidden_state[i]) ** 2).mean() for i in range(B)],
+                [((ut[i] - hidden_state[i]) ** 2).mean() for i in range(B)],
                 dim=0,
             )
         intermediate_losses.append(layer_loss)
