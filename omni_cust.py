@@ -724,13 +724,9 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         position_ids: torch.Tensor,
         guidance_scale: float = 1.0,
         generator: Optional[torch.Generator] = None,
-    ) -> torch.Tensor:
-        """
-        Generate image using single-pass progressive refinement.
-        Each block progressively denoises the image.
-        """
-        B = x.shape[0] if not isinstance(x, list) else len(x)
-        device = x.device if not isinstance(x, list) else x[0].device
+    ):
+        B = x.shape[0]
+        device = x.device
 
         timestep = torch.ones((B,), device=device, dtype=torch.float32)
 
@@ -745,30 +741,23 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             padding_latent=None,
             past_key_values=None,
             return_past_key_values=False,
-            offload_model=False
+            offload_model=False,
         )
 
-        current = x
-        num_blocks = self.num_layers - 1
-        block_indices = list(range(num_blocks)) + [-1]
-        
         intermediate_results = []
 
-        for layer_idx in range(num_blocks):
+        current = x
+
+        for layer_idx in range(self.num_layers):
             denoised_pred = intermediate_preds[layer_idx]
-            
-            if isinstance(current, list):
-                current = [denoised_pred[i] for i in range(len(current))]
-            else:
-                current = denoised_pred
 
-            intermediate_results.append(deepcopy(current))
+            if guidance_scale > 1.0:
+                pass
 
-        if isinstance(current, list):
-            current = [final_pred[i] for i in range(len(current))]
-        else:
-            current = final_pred
-        intermediate_results.append(deepcopy(current))
+            current = denoised_pred
+            intermediate_results.append(current.clone())
+
+        return final_pred, intermediate_results
 
 def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """Loss for training the score model
