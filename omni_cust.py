@@ -757,6 +757,8 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             current = denoised_pred
             intermediate_results.append(current.clone())
 
+        print(f"GENERATE LENGTH: {len(intermediate_results)}")
+
         return final_pred, intermediate_results
 
 def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
