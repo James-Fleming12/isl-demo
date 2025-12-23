@@ -823,8 +823,6 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
     xt = t.view(-1,1,1,1) * x0 + (1 - t.view(-1,1,1,1)) * x1
     xt = xt.to(model_dtype)
-    xt = model.module.input_x_embedder(xt)
-    xt = [xt[i] for i in range(B)]
 
     ut = [x1[i] - x0[i] for i in range(B)]
     ut = [i.to(model_dtype) for i in ut]
