@@ -296,7 +296,7 @@ class QuarterBlockPhi3Transformer(QuarterBlockPhi3):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        block_inputs: List[torch.Tensor] = None,
+        # block_inputs: List[torch.Tensor] = None,
         num_tokens: List[int] | int = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -320,8 +320,8 @@ class QuarterBlockPhi3Transformer(QuarterBlockPhi3):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
         
-        if block_inputs is None:
-            raise ValueError("Per Block Inputs not given")
+        # if block_inputs is None:
+        #     raise ValueError("Per Block Inputs not given")
 
         if self.gradient_checkpointing and self.training:
             if use_cache:

@@ -737,39 +737,39 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
         else:
             x1 = torch.stack(x1, dim=0)
 
+    device = x1.device
+    model_dtype = next(model.parameters()).dtype
+
     B = x1.shape[0]
     x0 = sample_x0(x1)
+
+    x0 = x0.to(model_dtype)
+    x1 = x1.to(model_dtype)
 
     if isinstance(x0, list):
         if x0[0].dim() == 4:
             x0 = torch.cat(x0, dim=0)
         else:
             x0 = torch.stack(x0, dim=0)
-    
-    device = x1.device
 
     t = sample_timestep(x1)
-    # t = torch.ones(B).to(device)
-
-    xt = t.view(-1, 1, 1, 1) * x0 + (1 - t.view(-1, 1, 1, 1)) * x1
-
-    model_dtype = next(model.parameters()).dtype
-
-    xt = xt.to(model_dtype)
-    x0 = x0.to(model_dtype)
-    x1 = x1.to(model_dtype)
     t = t.to(model_dtype)
-    
+
+    xt = [t[i] * x1[i] + (1 - t[i]) * x0[i] for i in range(B)]
+    xt = [i.to(model_dtype) for i in xt]
+    ut = [x1[i] - x0[i] for i in range(B)]
+    ut = [i.to(model_dtype) for i in ut]
+
     num_layers = model.module.num_layers # changed for deepspeed
-    intermediate_noise_levels = [0.75, 0.5, 0.25]
+    intermediate_noise_levels = [0.25, 0.5, 0.75]
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
 
-    layer_targets = []
-    for noise_level in intermediate_noise_levels:
-        target = (noise_level * t) * x0 + (1 - noise_level * t) * x1
-        layer_targets.append(target)
+    # layer_targets = []
+    # for noise_level in intermediate_noise_levels:
+    #     target = (noise_level * t) * x0 + (1 - noise_level * t) * x1
+    #     layer_targets.append(target)
     
-    model_kwargs["block_inputs"] = layer_targets
+    # model_kwargs["block_inputs"] = layer_targets
     
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
@@ -778,26 +778,47 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
             model_output = torch.cat(model_output, dim=0)
         else:
             model_output = torch.stack(model_output, dim=0)
-    
+
     terms = {}
     total_loss = 0.0
 
-    for index, i in enumerate(intermediate_layer_indices):
-        noise_level = intermediate_noise_levels[index]
-        layer_t = noise_level * t
-        layer_target = layer_t.view(-1, 1, 1, 1) * x0 + (1 - layer_t.view(-1, 1, 1, 1)) * x1
+    if patch_weight is not None:
+        main_loss = torch.stack(
+            [((ut[i] - model_output[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+            dim=0,
+        )
+    else:
+        main_loss = torch.stack(
+            [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
+            dim=0,
+        )
+
+    intermediate_losses = []
+    for index, layer_idx in enumerate(intermediate_layer_indices):
+        level = intermediate_noise_levels[index]
         
-        hidden_state = hidden_states[i]
+        hidden_state = hidden_states[layer_idx]
         if isinstance(hidden_state, list):
             if hidden_state[0].dim() == 4:
                 hidden_state = torch.cat(hidden_state, dim=0)
             else:
                 hidden_state = torch.stack(hidden_state, dim=0)
-        
-        total_loss += ((layer_target - hidden_state) ** 2).mean()
 
-    total_loss += ((x1 - model_output) ** 2).mean()
+        if patch_weight is not None:
+            layer_loss = torch.stack(
+                [((ut[i] * level - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+                dim=0,
+            )
+        else:
+            layer_loss = torch.stack(
+                [((ut[i] * level - hidden_state[i]) ** 2).mean() for i in range(B)],
+                dim=0,
+            )
+        intermediate_losses.append(layer_loss)
+
+    total_loss = main_loss + sum(intermediate_losses)
+    terms["loss"] = total_loss.mean()
+    terms["main_loss"] = main_loss.mean()
+    terms["intermediate_loss"] = sum([loss.mean() for loss in intermediate_losses])
     
-    terms["loss"] = total_loss
-
     return terms
