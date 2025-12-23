@@ -773,16 +773,16 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         for block_idx, layer_idx in enumerate(block_indices):
             if layer_idx == -1:
-                velocity_pred = final_pred
+                denoised_pred = final_pred
             else:
-                velocity_pred = intermediate_preds[layer_idx]
+                denoised_pred = intermediate_preds[layer_idx]
 
             if guidance_scale > 1.0:
                 pass
             if isinstance(current, list):
-                current = [current[i] + dt * velocity_pred[i] for i in range(len(current))]
+                current = [denoised_pred[i] for i in range(len(current))]
             else:
-                current = current + dt * velocity_pred
+                current = denoised_pred
 
             intermediate_results.append(deepcopy(current))
         
@@ -827,11 +827,8 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     xt = t.view(-1,1,1,1) * x0 + (1 - t.view(-1,1,1,1)) * x1
     xt = xt.to(model_dtype)
 
-    ut = [x1[i] - x0[i] for i in range(B)]
-    ut = [i.to(model_dtype) for i in ut]
-
     num_layers = model.module.num_layers # changed for deepspeed
-    # intermediate_noise_levels = [0.25, 0.5, 0.75]
+    intermediate_noise_levels = [0.25, 0.5, 0.75]
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
 
     model_output, hidden_states = model(xt, t, **model_kwargs)
@@ -847,18 +844,21 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
     if patch_weight is not None:
         main_loss = torch.stack(
-            [((ut[i] - model_output[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+            [((x1[i] - model_output[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
             dim=0,
         )
     else:
         main_loss = torch.stack(
-            [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
+            [((x1[i] - model_output[i]) ** 2).mean() for i in range(B)],
             dim=0,
         )
 
     intermediate_losses = []
     for index, layer_idx in enumerate(intermediate_layer_indices):
         hidden_state = hidden_states[layer_idx]
+        effective_t = t.view(-1,1,1,1) * (1 - intermediate_noise_levels[index])
+        target = effective_t * x0 + (1 - effective_t) * x1
+
         if isinstance(hidden_state, list):
             if hidden_state[0].dim() == 4:
                 hidden_state = torch.cat(hidden_state, dim=0)
@@ -867,12 +867,12 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
         if patch_weight is not None:
             layer_loss = torch.stack(
-                [((ut[i] - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+                [((target[i] - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
                 dim=0,
             )
         else:
             layer_loss = torch.stack(
-                [((ut[i] - hidden_state[i]) ** 2).mean() for i in range(B)],
+                [((target[i] - hidden_state[i]) ** 2).mean() for i in range(B)],
                 dim=0,
             )
         intermediate_losses.append(layer_loss)

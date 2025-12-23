@@ -1,0 +1,154 @@
+    @torch.no_grad()
+    def generate(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        input_img_latents: Optional[torch.Tensor],
+        input_image_sizes: dict,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        guidance_scale: float = 1.0,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Generate image using single-pass progressive refinement.
+        Each block progressively denoises the image.
+        """
+        B = x.shape[0] if not isinstance(x, list) else len(x)
+        device = x.device if not isinstance(x, list) else x[0].device
+
+        timestep = torch.ones((B,), device=device, dtype=torch.float32)
+
+        final_pred, intermediate_preds = self.inference(
+            x=x,
+            timestep=timestep,
+            input_ids=input_ids,
+            input_img_latents=input_img_latents,
+            input_image_sizes=input_image_sizes,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            padding_latent=None,
+            past_key_values=None,
+            return_past_key_values=False,
+            offload_model=False
+        )
+
+        current = x
+        num_blocks = 4
+        block_indices = [self.num_layers//4, self.num_layers//2, self.num_layers*3//4, -1]
+        intermediate_results = []
+
+        dt = 1.0 / num_blocks
+
+        for block_idx, layer_idx in enumerate(block_indices):
+            if layer_idx == -1:
+                velocity_pred = final_pred
+            else:
+                velocity_pred = intermediate_preds[layer_idx]
+
+            if guidance_scale > 1.0:
+                pass
+            if isinstance(current, list):
+                current = [current[i] + dt * velocity_pred[i] for i in range(len(current))]
+            else:
+                current = current + dt * velocity_pred
+
+            intermediate_results.append(deepcopy(current))
+        
+        return current, intermediate_results
+
+def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+    """Loss for training the score model
+    Args:
+    - model: DeepSpeed Model Engine
+    - x1: clean datapoint (can be list of tensors or tensor)
+    - model_kwargs: additional arguments for torch model
+
+    Trains the model to have each block predict a quarter of the movement
+    """
+    if model_kwargs == None:
+        model_kwargs = {}
+    
+    if isinstance(x1, list):
+        if x1[0].dim() == 4:
+            x1 = torch.cat(x1, dim=0)
+        else:
+            x1 = torch.stack(x1, dim=0)
+
+    device = x1.device
+    model_dtype = next(model.parameters()).dtype
+
+    B = x1.shape[0]
+    x0 = sample_x0(x1)
+
+    x0 = x0.to(model_dtype)
+    x1 = x1.to(model_dtype)
+
+    if isinstance(x0, list):
+        if x0[0].dim() == 4:
+            x0 = torch.cat(x0, dim=0)
+        else:
+            x0 = torch.stack(x0, dim=0)
+
+    t = sample_timestep(x1)
+    t = t.to(model_dtype)
+
+    xt = t.view(-1,1,1,1) * x0 + (1 - t.view(-1,1,1,1)) * x1
+    xt = xt.to(model_dtype)
+
+    ut = [x1[i] - x0[i] for i in range(B)]
+    ut = [i.to(model_dtype) for i in ut]
+
+    num_layers = model.module.num_layers # changed for deepspeed
+    # intermediate_noise_levels = [0.25, 0.5, 0.75]
+    intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
+
+    model_output, hidden_states = model(xt, t, **model_kwargs)
+
+    if isinstance(model_output, list):
+        if model_output[0].dim() == 4:
+            model_output = torch.cat(model_output, dim=0)
+        else:
+            model_output = torch.stack(model_output, dim=0)
+
+    terms = {}
+    total_loss = 0.0
+
+    if patch_weight is not None:
+        main_loss = torch.stack(
+            [((ut[i] - model_output[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+            dim=0,
+        )
+    else:
+        main_loss = torch.stack(
+            [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
+            dim=0,
+        )
+
+    intermediate_losses = []
+    for index, layer_idx in enumerate(intermediate_layer_indices):
+        hidden_state = hidden_states[layer_idx]
+        if isinstance(hidden_state, list):
+            if hidden_state[0].dim() == 4:
+                hidden_state = torch.cat(hidden_state, dim=0)
+            else:
+                hidden_state = torch.stack(hidden_state, dim=0)
+
+        if patch_weight is not None:
+            layer_loss = torch.stack(
+                [((ut[i] - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+                dim=0,
+            )
+        else:
+            layer_loss = torch.stack(
+                [((ut[i] - hidden_state[i]) ** 2).mean() for i in range(B)],
+                dim=0,
+            )
+        intermediate_losses.append(layer_loss)
+
+    total_loss = main_loss + sum(intermediate_losses)
+    terms["loss"] = total_loss.mean()
+    terms["main_loss"] = main_loss.mean()
+    terms["intermediate_loss"] = sum([loss.mean() for loss in intermediate_losses])
+    
+    return terms
