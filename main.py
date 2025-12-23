@@ -90,10 +90,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
         input_img_latents=None,
         input_image_sizes=batch['input_image_sizes'],
         attention_mask=batch['attention_mask'][0:1].to(device),
-        position_ids=batch['position_ids'][0:1].to(device),
-        padding_latent=padding_latent,
-        past_key_values=None,
-        return_past_key_values=False
+        position_ids=batch['position_ids'][0:1].to(device)
     )
 
     vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
