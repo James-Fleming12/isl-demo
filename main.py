@@ -20,6 +20,9 @@ from transformers import Phi3Config
 
 import deepspeed
 
+def get_titles(num_blocks):
+    return ['Noisy Input'] + [f'Layer {i+1}' for i in range(num_blocks)] + ['Ground Truth']
+
 def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, titles=None):
     """
     Create a labeled image showing progression through blocks
@@ -27,11 +30,12 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
     block_outputs: List of 4 images from each block
     ground_truths: Optional list of ground truth targets for each block
     """
-    if titles is None:
-        titles = titles = ['Noisy Input', 'Block 1', 'Block 2', 'Block 3', 'Block 4', 
-          'Block 5', 'Block 6', 'Block 7', 'Block 8', 'Ground Truth']
+    titles = get_titles(len(block_outputs)) if titles is None else titles
     
-    fig, axes = plt.subplots(2, 5, figsize=(25, 10))
+    num_images = len(block_outputs) + 2
+    cols = min(8, num_images)
+    rows = (num_images + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
     axes = axes.flat
     
     if isinstance(noisy_input, list):
@@ -66,18 +70,16 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
             gt_img = ground_truths[0][0].detach().squeeze().permute(1, 2, 0).cpu().numpy()
 
         gt_img = (gt_img - gt_img.min()) / (gt_img.max() - gt_img.min())
-        axes[9].imshow(gt_img)
-        axes[9].set_title(titles[9])
-        axes[9].axis('off')
+        gt_idx = len(block_outputs) + 1
+        axes.flat[gt_idx].imshow(gt_img)
+        axes.flat[gt_idx].set_title(titles[gt_idx])
+        axes.flat[gt_idx].axis('off')
             
     plt.tight_layout()
     plt.savefig("inference_check.png")
 
 def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     num_layers = model.num_layers
-    intermediate_layer_indices = [num_layers//8, num_layers//4, num_layers*3//8,
-                              num_layers//2, num_layers*5//8, num_layers*3//4,
-                              num_layers*7//8]
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -133,8 +135,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
         noisy_input=decoded_noise,
         block_outputs=decoded_blocks,
         ground_truths=[output_image],
-        titles = ['Noisy Input', 'Block 1', 'Block 2', 'Block 3', 'Block 4', 
-          'Block 5', 'Block 6', 'Block 7', 'Block 8', 'Ground Truth']
+        titles = None
     )
 
 def main():

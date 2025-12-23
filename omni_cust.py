@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 import json
 from PIL import Image
 
-from cust_phi import QuarterBlockPhi3Transformer
+from cust_phi import BlockPhi3Transformer
 
 class JsonFolderDataset(Dataset):
     def __init__(self, folder_path, processor, image_transform=None, max_input_length=1024, small_subset=False):
@@ -232,7 +232,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         self.initialize_weights()
 
-        self.llm = QuarterBlockPhi3Transformer(config=transformer_config)
+        self.llm = BlockPhi3Transformer(config=transformer_config)
         self.llm.config.use_cache = False
 
         self.num_layers = transformer_config.num_hidden_layers + 1
@@ -302,11 +302,8 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         if num_layers is None:
             print("Warning: Could not determine number of layers, attempting direct mapping")
             return omni_state_dict
-        
-        assert num_layers % 8 == 0, f"Number of layers ({num_layers}) must be divisible by 8"
-        
-        eighth = num_layers // 8
-        print(f"Mapping {num_layers} layers ({eighth} per block)")
+
+        print(f"Mapping {num_layers} layers (1 per block)")
 
         for key, value in omni_state_dict.items():
             if key.startswith('llm.layers.'):
@@ -314,42 +311,16 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
                 layer_idx = int(parts[2])
                 param_path = '.'.join(parts[3:])
 
-                if layer_idx < eighth:
-                    block_idx = 0
-                    new_idx = layer_idx
-                elif layer_idx < 2 * eighth:
-                    block_idx = 1
-                    new_idx = layer_idx - eighth
-                elif layer_idx < 3 * eighth:
-                    block_idx = 2
-                    new_idx = layer_idx - 2 * eighth
-                elif layer_idx < 4 * eighth:
-                    block_idx = 3
-                    new_idx = layer_idx - 3 * eighth
-                elif layer_idx < 5 * eighth:
-                    block_idx = 4
-                    new_idx = layer_idx - 4 * eighth
-                elif layer_idx < 6 * eighth:
-                    block_idx = 5
-                    new_idx = layer_idx - 5 * eighth
-                elif layer_idx < 7 * eighth:
-                    block_idx = 6
-                    new_idx = layer_idx - 6 * eighth
-                else:
-                    block_idx = 7
-                    new_idx = layer_idx - 7 * eighth
+                block_idx = layer_idx
+                new_idx = 0
 
                 if target_format == 'blocks_modulelist':
                     new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
                     mapped_state_dict[new_key] = value
-                    block_name = f'block{block_idx + 1}'
-                    alt_key = f'llm.{block_name}.{new_idx}.{param_path}'
-                    mapped_state_dict[alt_key] = value
                 else:
-                    block_name = f'block{block_idx + 1}'
-                    new_key = f'llm.{block_name}.{new_idx}.{param_path}'
+                    new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
                     mapped_state_dict[new_key] = value
-                
+                    
             elif key.startswith('llm.'):
                 mapped_state_dict[key] = value
             else:
@@ -550,8 +521,9 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         batch_size = timestep.size(0)
         # num_blocks = len(self.llm.blocks)
         block_timesteps = []
+        num_blocks = len(self.llm.blocks)
         for b in range(batch_size):
-            t_schedule = torch.tensor([1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125], device=timestep.device, dtype=timestep.dtype)
+            t_schedule = torch.linspace(1.0, 0.0, num_blocks, device=timestep.device, dtype=timestep.dtype)
             t_schedule *= timestep[b]
             block_timesteps.append(t_schedule)
 
@@ -777,13 +749,10 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         )
 
         current = x
-        num_blocks = 8
-        block_indices = [self.num_layers//8, self.num_layers//4, self.num_layers*3//8, 
-                        self.num_layers//2, self.num_layers*5//8, self.num_layers*3//4,
-                        self.num_layers*7//8, -1]
+        num_blocks = self.num_layers - 1
+        block_indices = list(range(num_blocks)) + [-1]
+        
         intermediate_results = []
-
-        # dt = 1.0 / num_blocks
 
         for block_idx, layer_idx in enumerate(block_indices):
             if layer_idx == -1:
@@ -843,10 +812,9 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     xt = xt.to(model_dtype)
 
     num_layers = model.module.num_layers # changed for deepspeed
-    intermediate_noise_levels = [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
-    intermediate_layer_indices = [num_layers//8, num_layers//4, num_layers*3//8,
-                                num_layers//2, num_layers*5//8, num_layers*3//4,
-                                num_layers*7//8]
+    num_transformer_layers = num_layers - 1 # exclude final layer
+    intermediate_layer_indices = list(range(num_transformer_layers))
+    intermediate_noise_levels = [1.0 - (i+1)/(num_transformer_layers+1) for i in range(num_transformer_layers)]
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
     if isinstance(model_output, list):
