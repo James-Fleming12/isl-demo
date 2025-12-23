@@ -17,7 +17,7 @@ from transformers.utils import logging
 
 from transformers.models.phi3.modeling_phi3 import Phi3DecoderLayer, Phi3RMSNorm, AttentionMaskConverter, _prepare_4d_causal_attention_mask_with_cache_position
 
-from omni_cust import TimestepEmbedder
+from OmniGenCode.OmniGen.model import TimestepEmbedder
 
 logger = logging.get_logger(__name__)
 
