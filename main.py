@@ -131,11 +131,9 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
             model_input.float() / vae.config.scaling_factor
         ).sample
 
-    print(f"INFERENCE CHECK LENGTH {len(decoded_blocks)}")
-
     visualize_block_progression(
         noisy_input=decoded_noise,
-        block_outputs=decoded_blocks[::-1],
+        block_outputs=decoded_blocks[::-1][:3],
         ground_truths=[output_image],
         titles = None
     )
