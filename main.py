@@ -71,10 +71,10 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
 
         gt_img = (gt_img - gt_img.min()) / (gt_img.max() - gt_img.min())
         gt_idx = len(block_outputs) + 1
-        axes.flat[gt_idx].imshow(gt_img)
-        axes.flat[gt_idx].set_title(titles[gt_idx])
-        axes.flat[gt_idx].axis('off')
-            
+        axes[gt_idx].imshow(gt_img)
+        axes[gt_idx].set_title(titles[gt_idx])
+        axes[gt_idx].axis('off')
+
     plt.tight_layout()
     plt.savefig("inference_check.png")
 
