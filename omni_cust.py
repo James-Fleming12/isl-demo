@@ -507,7 +507,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         return latents, num_tokens, shapes
 
     
-    def forward(self, x, timestep, input_ids, block_inputs, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
+    def forward(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
         time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)   
@@ -822,7 +822,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
             x0 = torch.stack(x0, dim=0)
 
     # t = sample_timestep(x1)
-    t = torch.ones(B)
+    t = torch.ones(B).to(device)
     t = t.to(model_dtype)
 
     xt = t.view(-1,1,1,1) * x0 + (1 - t.view(-1,1,1,1)) * x1

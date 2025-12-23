@@ -143,7 +143,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
 def main():
     batch_size = 1
     lr = 1e-4
-    epochs = 300
+    epochs = 700
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = argparse.ArgumentParser()
@@ -238,7 +238,6 @@ def main():
 
             model_kwargs = dict(
                 input_ids=data['input_ids'].to(device),
-                block_inputs=None,
                 input_img_latents=None,
                 input_image_sizes=data['input_image_sizes'],
                 attention_mask=data['attention_mask'].to(device),
