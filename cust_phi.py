@@ -17,6 +17,8 @@ from transformers.utils import logging
 
 from transformers.models.phi3.modeling_phi3 import Phi3DecoderLayer, Phi3RMSNorm, AttentionMaskConverter, _prepare_4d_causal_attention_mask_with_cache_position
 
+from omni_cust import TimestepEmbedder
+
 logger = logging.get_logger(__name__)
 
 class QuarterBlockPhi3(Phi3PreTrainedModel):
@@ -55,6 +57,7 @@ class QuarterBlockPhi3(Phi3PreTrainedModel):
         self.blocks = nn.ModuleList([
             self.block1, self.block2, self.block3, self.block4
         ])
+        self.block_time_embedders = nn.ModuleList([TimestepEmbedder(config.hidden_size) for _ in range(4)])
 
         self._attn_implementation = config._attn_implementation
         self.norm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -297,6 +300,7 @@ class QuarterBlockPhi3Transformer(QuarterBlockPhi3):
         self,
         input_ids: torch.LongTensor = None,
         # block_inputs: List[torch.Tensor] = None,
+        block_timesteps: Optional[torch.Tensor] = None,
         num_tokens: List[int] | int = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -374,6 +378,11 @@ class QuarterBlockPhi3Transformer(QuarterBlockPhi3):
             #         hidden_states[:, :-image_tokens],
             #         block_input_tokens
             #     ], dim=1)
+            if block_timesteps is not None:
+                current_t = block_timesteps[:, index]
+                time_emb = self.block_time_embedders[index](current_t, dtype=hidden_states.dtype)
+                hidden_states = hidden_states + time_emb.unsqueeze(1)
+
             for layer in block:
                 layer_idx += 1
                 layer_outputs = layer(
@@ -396,6 +405,7 @@ class QuarterBlockPhi3Transformer(QuarterBlockPhi3):
 
                 if output_hidden_states: # changed to be the output of the i-th layer instead of the input
                     all_hidden_states += (hidden_states,)
+
         hidden_states = self.norm(hidden_states)
 
         # add hidden states from the last decoder layer

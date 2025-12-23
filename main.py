@@ -79,8 +79,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     batch = next(iter(data))
-    output_image = [img.to(device) for img in batch['output_images']]
-    output_image = output_image[0]
+    output_image = batch["output_images"][0].to(device)
 
     padding_latent = batch.get("padding_images", None)
     if padding_latent is not None:
@@ -108,19 +107,21 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
 
     model_input = torch.randn_like(gt_latent_scaled).to(model_dtype)
 
-    model_output, hidden_states = model.inference(model_input, torch.ones(1, device=device, dtype=model_dtype), **model_kwargs)
+    # model_output, hidden_states = model.inference(model_input, torch.ones(1, device=device, dtype=model_dtype), **model_kwargs)
+    with torch.no_grad():
+        generated, intermediate_gen = model.generate(model_input, guidance_scale=1.0, **model_kwargs)
 
     decoded_blocks = []
 
     with torch.no_grad():
-        for idx in intermediate_layer_indices:
+        for block_latent in intermediate_gen:
             decoded = vae.decode(
-                hidden_states[idx].float() / vae.config.scaling_factor
+                block_latent.float() / vae.config.scaling_factor
             ).sample
             decoded_blocks.append(decoded)
 
         final_decoded = vae.decode(
-            model_output.float() / vae.config.scaling_factor
+            generated.float() / vae.config.scaling_factor
         ).sample
         decoded_blocks.append(final_decoded)
 

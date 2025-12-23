@@ -1,9 +1,10 @@
+from copy import deepcopy
 import os
 import torch
 import torch.nn as nn
 import numpy as np
 import math
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from diffusers.loaders import PeftAdapterMixin
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
@@ -527,14 +528,24 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         else:
             input_emb = torch.cat([time_token, x], dim=1)
 
-        for index, i in enumerate(block_inputs):
-            if i.dim() == 5 and i.shape[1] == 1: # problem with stacking
-                block_inputs[index] = i.squeeze(1)
+        # for index, i in enumerate(block_inputs):
+        #     if i.dim() == 5 and i.shape[1] == 1: # problem with stacking
+        #         block_inputs[index] = i.squeeze(1)
 
-        for index, i in enumerate(block_inputs):
-            block_inputs[index] = self.x_embedder(i)
+        # for index, i in enumerate(block_inputs):
+        #     block_inputs[index] = self.x_embedder(i)
 
-        output = self.llm(inputs_embeds=input_emb, block_inputs=block_inputs, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        batch_size = timestep.size(0)
+        num_blocks = len(self.llm.blocks)
+        block_timesteps = []
+        for b in range(batch_size):
+            t_schedule = torch.tensor([1.0, 0.75, 0.5, 0.25], device=timestep.device, dtype=timestep.dtype)
+            t_schedule *= timestep[b]
+            block_timesteps.append(t_schedule)
+
+        block_timesteps = torch.stack(block_timesteps, dim=0)
+
+        output = self.llm(inputs_embeds=input_emb, block_timesteps=block_timesteps, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
         hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
         if input_is_list:
@@ -673,7 +684,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             return latents, past_key_values
         return latents, unpatched_hidden_states
 
-
     @torch.no_grad()
     def forward_with_cfg(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, cfg_scale, use_img_cfg, img_cfg_scale, past_key_values, use_kv_cache, offload_model):      
         self.llm.config.use_cache = use_kv_cache
@@ -719,14 +729,70 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         
         return torch.cat(model_out, dim=0), pask_key_values
     
+    @torch.no_grad()
+    def generate(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        input_img_latents: Optional[torch.Tensor],
+        input_image_sizes: dict,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        guidance_scale: float = 1.0,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """
+        Generate image using single-pass progressive refinement.
+        Each block progressively denoises the image.
+        """
+        B = x.shape[0] if not isinstance(x, list) else len(x)
+        device = x.device if not isinstance(x, list) else x[0].device
+
+        timestep = torch.ones((B,), device=device, dtype=torch.float32)
+
+        final_pred, intermediate_preds = self.inference(
+            x=x,
+            timestep=timestep,
+            input_ids=input_ids,
+            input_img_latents=input_img_latents,
+            input_image_sizes=input_image_sizes,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            padding_latent=None,
+            past_key_values=None,
+            return_past_key_values=False,
+            offload_model=False
+        )
+
+        current = x
+        num_blocks = 4
+        block_indices = [self.num_layers//4, self.num_layers//2, self.num_layers*3//4, -1]
+        intermediate_results = []
+        for block_idx, layer_idx in enumerate(block_indices):
+            if layer_idx == -1:
+                velocity_pred = final_pred
+            else:
+                velocity_pred = intermediate_preds[layer_idx]
+
+            if guidance_scale > 1.0:
+                pass
+            if isinstance(current, list):
+                current = [current[i] + velocity_pred[i] for i in range(len(current))]
+            else:
+                current = current + velocity_pred
+
+            intermediate_results.append(deepcopy(current))
+        
+        return current, intermediate_results
+
 def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """Loss for training the score model
     Args:
     - model: DeepSpeed Model Engine
     - x1: clean datapoint (can be list of tensors or tensor)
     - model_kwargs: additional arguments for torch model
-    
-    Convention: t=1 is full noise, t=0 is clean
+
+    Trains the model to have each block predict a quarter of the movement
     """
     if model_kwargs == None:
         model_kwargs = {}
@@ -761,7 +827,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     ut = [i.to(model_dtype) for i in ut]
 
     num_layers = model.module.num_layers # changed for deepspeed
-    intermediate_noise_levels = [0.25, 0.5, 0.75]
+    # intermediate_noise_levels = [0.25, 0.5, 0.75]
     intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
 
     # layer_targets = []
@@ -795,8 +861,6 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
     intermediate_losses = []
     for index, layer_idx in enumerate(intermediate_layer_indices):
-        level = intermediate_noise_levels[index]
-        
         hidden_state = hidden_states[layer_idx]
         if isinstance(hidden_state, list):
             if hidden_state[0].dim() == 4:
@@ -806,12 +870,12 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
         if patch_weight is not None:
             layer_loss = torch.stack(
-                [((ut[i] * level - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
+                [((ut[i] * 0.25 - hidden_state[i]) ** 2 * patch_weight[i]).mean() for i in range(B)],
                 dim=0,
             )
         else:
             layer_loss = torch.stack(
-                [((ut[i] * level - hidden_state[i]) ** 2).mean() for i in range(B)],
+                [((ut[i] * 0.25 - hidden_state[i]) ** 2).mean() for i in range(B)],
                 dim=0,
             )
         intermediate_losses.append(layer_loss)
