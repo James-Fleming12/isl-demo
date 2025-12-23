@@ -777,9 +777,9 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             if guidance_scale > 1.0:
                 pass
             if isinstance(current, list):
-                current = [current[i] + velocity_pred[i] for i in range(len(current))]
+                current = [velocity_pred[i] for i in range(len(current))]
             else:
-                current = current + velocity_pred
+                current = velocity_pred
 
             intermediate_results.append(deepcopy(current))
         
