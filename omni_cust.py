@@ -754,22 +754,21 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         
         intermediate_results = []
 
-        for block_idx, layer_idx in enumerate(block_indices):
-            if layer_idx == -1:
-                denoised_pred = final_pred
-            else:
-                denoised_pred = intermediate_preds[layer_idx]
-
-            if guidance_scale > 1.0:
-                pass
+        for layer_idx in range(num_blocks):
+            denoised_pred = intermediate_preds[layer_idx]
+            
             if isinstance(current, list):
                 current = [denoised_pred[i] for i in range(len(current))]
             else:
                 current = denoised_pred
 
             intermediate_results.append(deepcopy(current))
-        
-        return current, intermediate_results
+
+        if isinstance(current, list):
+            current = [final_pred[i] for i in range(len(current))]
+        else:
+            current = final_pred
+        intermediate_results.append(deepcopy(current))
 
 def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """Loss for training the score model
