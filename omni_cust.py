@@ -536,7 +536,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         #     block_inputs[index] = self.x_embedder(i)
 
         batch_size = timestep.size(0)
-        num_blocks = len(self.llm.blocks)
+        # num_blocks = len(self.llm.blocks)
         block_timesteps = []
         for b in range(batch_size):
             t_schedule = torch.tensor([1.0, 0.75, 0.5, 0.25], device=timestep.device, dtype=timestep.dtype)
@@ -750,7 +750,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         timestep = torch.ones((B,), device=device, dtype=torch.float32)
 
-        final_pred, intermediate_preds = self.inference(
+        final_pred, intermediate_preds = self.forward(
             x=x,
             timestep=timestep,
             input_ids=input_ids,
@@ -769,7 +769,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         block_indices = [self.num_layers//4, self.num_layers//2, self.num_layers*3//4, -1]
         intermediate_results = []
 
-        dt = 1.0 / num_blocks
+        # dt = 1.0 / num_blocks
 
         for block_idx, layer_idx in enumerate(block_indices):
             if layer_idx == -1:
@@ -821,7 +821,8 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
         else:
             x0 = torch.stack(x0, dim=0)
 
-    t = sample_timestep(x1)
+    # t = sample_timestep(x1)
+    t = torch.ones(B)
     t = t.to(model_dtype)
 
     xt = t.view(-1,1,1,1) * x0 + (1 - t.view(-1,1,1,1)) * x1
