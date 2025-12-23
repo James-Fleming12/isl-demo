@@ -28,9 +28,10 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
     ground_truths: Optional list of ground truth targets for each block
     """
     if titles is None:
-        titles = ['Noisy Input', 'Block 1', 'Block 2', 'Block 3', 'Block 4', 'Ground Truth']
+        titles = titles = ['Noisy Input', 'Block 1', 'Block 2', 'Block 3', 'Block 4', 
+          'Block 5', 'Block 6', 'Block 7', 'Block 8', 'Ground Truth']
     
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig, axes = plt.subplots(2, 5, figsize=(25, 10))
     axes = axes.flat
     
     if isinstance(noisy_input, list):
@@ -65,16 +66,18 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
             gt_img = ground_truths[0][0].detach().squeeze().permute(1, 2, 0).cpu().numpy()
 
         gt_img = (gt_img - gt_img.min()) / (gt_img.max() - gt_img.min())
-        axes[5].imshow(gt_img)
-        axes[5].set_title(titles[5])
-        axes[5].axis('off')
-    
+        axes[9].imshow(gt_img)
+        axes[9].set_title(titles[9])
+        axes[9].axis('off')
+            
     plt.tight_layout()
     plt.savefig("inference_check.png")
 
 def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     num_layers = model.num_layers
-    intermediate_layer_indices = [num_layers//4, num_layers//2, num_layers*3//4]
+    intermediate_layer_indices = [num_layers//8, num_layers//4, num_layers*3//8,
+                              num_layers//2, num_layers*5//8, num_layers*3//4,
+                              num_layers*7//8]
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -130,14 +133,8 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
         noisy_input=decoded_noise,
         block_outputs=decoded_blocks,
         ground_truths=[output_image],
-        titles=[
-            f'Noisy Input (t=1)',
-            'Block 1 Output',
-            'Block 2 Output', 
-            'Block 3 Output',
-            'Block 4 Output',
-            'Ground Truth'
-        ]
+        titles = ['Noisy Input', 'Block 1', 'Block 2', 'Block 3', 'Block 4', 
+          'Block 5', 'Block 6', 'Block 7', 'Block 8', 'Ground Truth']
     )
 
 def main():

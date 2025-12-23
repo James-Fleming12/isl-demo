@@ -37,27 +37,43 @@ class QuarterBlockPhi3(Phi3PreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.embed_dropout = nn.Dropout(config.embd_pdrop)
         num_layers = config.num_hidden_layers
-        assert num_layers % 4 == 0, "Number of Hidden Layers needs to be divisible 4"
+        assert num_layers % 8 == 0, f"Number of layers ({num_layers}) must be divisible by 8"
         self.block1 = nn.ModuleList([
             Phi3DecoderLayer(config, layer_idx) 
-            for layer_idx in range(0, num_layers//4)
+            for layer_idx in range(0, num_layers//8)
         ])
         self.block2 = nn.ModuleList([
             Phi3DecoderLayer(config, layer_idx) 
-            for layer_idx in range(num_layers//4, num_layers//2)
+            for layer_idx in range(num_layers//8, num_layers*2//8)
         ])
         self.block3 = nn.ModuleList([
             Phi3DecoderLayer(config, layer_idx) 
-            for layer_idx in range(num_layers//2, num_layers*3//4)
+            for layer_idx in range(num_layers*2//8, num_layers*3//8)
         ])
         self.block4 = nn.ModuleList([
             Phi3DecoderLayer(config, layer_idx) 
-            for layer_idx in range(num_layers*3//4, num_layers)
+            for layer_idx in range(num_layers*3//8, num_layers*4//8)
         ])
-        self.blocks = nn.ModuleList([
-            self.block1, self.block2, self.block3, self.block4
+        self.block5 = nn.ModuleList([
+            Phi3DecoderLayer(config, layer_idx) 
+            for layer_idx in range(num_layers*4//8, num_layers*5//8)
         ])
-        self.block_time_embedders = nn.ModuleList([TimestepEmbedder(config.hidden_size) for _ in range(4)])
+        self.block6 = nn.ModuleList([
+            Phi3DecoderLayer(config, layer_idx) 
+            for layer_idx in range(num_layers*5//8, num_layers*6//8)
+        ])
+        self.block7 = nn.ModuleList([
+            Phi3DecoderLayer(config, layer_idx) 
+            for layer_idx in range(num_layers*6//8, num_layers*7//8)
+        ])
+        self.block8 = nn.ModuleList([
+            Phi3DecoderLayer(config, layer_idx) 
+            for layer_idx in range(num_layers*7//8, num_layers)
+        ])
+        self.blocks = nn.ModuleList(
+            [self.block1, self.block2, self.block3, self.block4, self.block5, self.block6, self.block7, self.block8]
+        )
+        self.block_time_embedders = nn.ModuleList([TimestepEmbedder(config.hidden_size) for _ in range(len(self.blocks))])
 
         self._attn_implementation = config._attn_implementation
         self.norm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
