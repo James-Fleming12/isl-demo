@@ -1026,9 +1026,9 @@ class BlockPhi3Transformer(BlockPhi3):
 
         hidden_states = self.norm(hidden_states)
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+        # # add hidden states from the last decoder layer
+        # if output_hidden_states:
+        #     all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
