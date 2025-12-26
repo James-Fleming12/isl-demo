@@ -130,7 +130,6 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
             model_input.float() / vae.config.scaling_factor
         ).sample
 
-    decoded_blocks = decoded_blocks[::-1]
     decoded_blocks.append(final_decoded)
 
     visualize_block_progression(
