@@ -112,6 +112,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     # model_output, hidden_states = model.inference(model_input, torch.ones(1, device=device, dtype=model_dtype), **model_kwargs)
     with torch.no_grad():
         generated, intermediate_gen = model.generate(model_input, guidance_scale=1.0, **model_kwargs)
+    intermediate_gen = intermediate_gen[:-1] # removes output layer
 
     decoded_blocks = []
 
