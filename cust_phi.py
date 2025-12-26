@@ -885,16 +885,6 @@ class BlockPhi3Transformer(BlockPhi3):
 
         layer_idx = -1
         for index, block in enumerate(self.blocks):
-            # if index > 0:
-            #     block_input_tokens = block_inputs[index-1]
-            #     if isinstance(num_tokens, list):
-            #         image_tokens = max(num_tokens)
-            #     else:
-            #         image_tokens = num_tokens
-            #     hidden_states = torch.cat([
-            #         hidden_states[:, :-image_tokens],
-            #         block_input_tokens
-            #     ], dim=1)
             if block_timesteps is not None:
                 current_t = block_timesteps[:, index]
                 time_emb = self.block_time_embedders[index](current_t, dtype=hidden_states.dtype)

@@ -125,15 +125,16 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
         final_decoded = vae.decode(
             generated.float() / vae.config.scaling_factor
         ).sample
-        decoded_blocks.append(final_decoded)
 
         decoded_noise = vae.decode(
             model_input.float() / vae.config.scaling_factor
         ).sample
 
+    decoded_blocks.append(final_decoded)
+
     visualize_block_progression(
         noisy_input=decoded_noise,
-        block_outputs=decoded_blocks[::-1][3:],
+        block_outputs=decoded_blocks,
         ground_truths=[output_image],
         titles = None
     )

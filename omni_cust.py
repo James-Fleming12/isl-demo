@@ -510,16 +510,8 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
         else:
             input_emb = torch.cat([time_token, x], dim=1)
-
-        # for index, i in enumerate(block_inputs):
-        #     if i.dim() == 5 and i.shape[1] == 1: # problem with stacking
-        #         block_inputs[index] = i.squeeze(1)
-
-        # for index, i in enumerate(block_inputs):
-        #     block_inputs[index] = self.x_embedder(i)
-
+            
         batch_size = timestep.size(0)
-        # num_blocks = len(self.llm.blocks)
         block_timesteps = []
         num_blocks = len(self.llm.blocks)
         for b in range(batch_size):
@@ -744,18 +736,18 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             offload_model=False,
         )
 
-        intermediate_results = []
+        # intermediate_results = []
+        # current = x
+        # for layer_idx in range(self.num_layers):
+        #     denoised_pred = intermediate_preds[layer_idx]
 
-        current = x
+        #     if guidance_scale > 1.0:
+        #         pass
 
-        for layer_idx in range(self.num_layers):
-            denoised_pred = intermediate_preds[layer_idx]
+        #     current = denoised_pred
+        #     intermediate_results.append(current.clone())
 
-            if guidance_scale > 1.0:
-                pass
-
-            current = denoised_pred
-            intermediate_results.append(current.clone())
+        intermediate_results = [pred.clone() for pred in intermediate_preds]
 
         return final_pred, intermediate_results
 
