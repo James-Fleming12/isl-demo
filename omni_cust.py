@@ -515,8 +515,15 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         block_timesteps = []
         num_blocks = len(self.llm.blocks)
         for b in range(batch_size):
-            t_schedule = torch.linspace(1.0, 0.0, num_blocks, device=timestep.device, dtype=timestep.dtype)
-            t_schedule *= timestep[b]
+            # t_schedule = torch.linspace(1.0, 0.0, num_blocks, device=timestep.device, dtype=timestep.dtype)
+            t_schedule = torch.zeros(num_blocks+1, device=timestep.device, dtype=timestep.dtype)
+
+            for i in range(num_blocks):
+                t_schedule[i+1] = 1.0 - (i+1)/(num_blocks+1)
+
+            t_schedule[0] = 1.0
+            t_schedule = t_schedule[:-1]
+
             block_timesteps.append(t_schedule)
 
         block_timesteps = torch.stack(block_timesteps, dim=0)
@@ -551,7 +558,10 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         batch_size = timestep.size(0)
         hidden_timesteps = torch.zeros((batch_size, self.num_layers), device=timestep.device, dtype=timestep.dtype)
         for b in range(batch_size):
-            hidden_timesteps[b] = torch.linspace(float(timestep[b]), 0, self.num_layers, device=timestep.device, dtype=timestep.dtype)
+            for i in range(self.num_layers - 1):
+                hidden_timesteps[b, i] = timestep[b] * (1.0 - i/(num_blocks+1))
+
+            hidden_timesteps[b, -1] = 0.0
 
         time_embs = []
         for layer_idx in range(self.num_layers):
