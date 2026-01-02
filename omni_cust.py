@@ -833,11 +833,11 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     terms = {}
     total_loss = 0.0
 
-    main_loss = torch.stack([per_layer_weights[-1] * ((x1[i] - model_output[i])**2).mean() for i in range(B)], dim=0)
+    main_loss = torch.stack([((x1[i] - model_output[i])**2).mean() for i in range(B)], dim=0)
 
     intermediate_losses = []
-    for i in intermediate_layer_indices:
-        hidden_state = hidden_states[i]
+    for layer_idx in intermediate_layer_indices:
+        hidden_state = hidden_states[layer_idx]
 
         if isinstance(hidden_state, list):
             if hidden_state[0].dim() == 4:
@@ -845,7 +845,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
             else:
                 hidden_state = torch.stack(hidden_state, dim=0)
 
-        layer_loss = torch.stack([per_layer_weights * ((x1[i] - model_output[i])**2).mean() for i in range(B)], dim=0)
+        layer_loss = torch.stack([per_layer_weights[layer_idx] * ((x1[i] - hidden_state[i])**2).mean() for i in range(B)], dim=0)
         
         intermediate_losses.append(layer_loss)
 
