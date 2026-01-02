@@ -821,7 +821,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     num_layers = model.module.num_layers # changed for deepspeed
     num_transformer_layers = num_layers - 1 # exclude final layer
     intermediate_layer_indices = list(range(num_transformer_layers))
-    per_layer_weights = [1 for _ in range(intermediate_layer_indices)] # tilde w
+    per_layer_weights = [1 for _ in intermediate_layer_indices] # tilde w
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
     if isinstance(model_output, list):
