@@ -142,7 +142,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
     )
 
 def main():
-    batch_size = 1
+    batch_size = 5
     lr = 1e-4
     epochs = 700
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

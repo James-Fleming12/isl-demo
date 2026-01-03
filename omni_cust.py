@@ -28,7 +28,7 @@ class JsonFolderDataset(Dataset):
         image_transform: optional transforms to apply to the images
         """
         samples_loaded = 1
-        max_samples = 1000
+        max_samples = 1
 
         self.folder_path = folder_path
         self.processor = processor
@@ -778,8 +778,8 @@ def noise_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patc
     
     return terms
 
-def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
-    """Loss for training the score model
+def isl_x0_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+    """x1 prediction Loss for training the score model
     Args:
     - model: DeepSpeed Model Engine
     - x1: clean datapoint (can be list of tensors or tensor)
@@ -846,6 +846,84 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
                 hidden_state = torch.stack(hidden_state, dim=0)
 
         layer_loss = torch.stack([per_layer_weights[layer_idx] * ((x1[i] - hidden_state[i])**2).mean() for i in range(B)], dim=0)
+        
+        intermediate_losses.append(layer_loss)
+
+    total_loss = main_loss + sum(intermediate_losses)
+    terms["loss"] = total_loss.mean()
+    terms["main_loss"] = main_loss.mean()
+    terms["intermediate_loss"] = sum([loss.mean() for loss in intermediate_losses])
+    
+    return terms
+
+def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+    """Flow Matching loss for training the score model
+    Args:
+    - model: DeepSpeed Model Engine
+    - x1: clean datapoint (can be list of tensors or tensor)
+    - model_kwargs: additional arguments for torch model
+
+    Trains the model to have each block predict a quarter of the movement
+    """
+    if model_kwargs == None:
+        model_kwargs = {}
+    
+    if isinstance(x1, list):
+        if x1[0].dim() == 4:
+            x1 = torch.cat(x1, dim=0)
+        else:
+            x1 = torch.stack(x1, dim=0)
+
+    device = x1.device
+    model_dtype = next(model.parameters()).dtype
+
+    B = x1.shape[0]
+    x0 = sample_x0(x1)
+
+    x0 = x0.to(model_dtype)
+    x1 = x1.to(model_dtype)
+
+    if isinstance(x0, list):
+        if x0[0].dim() == 4:
+            x0 = torch.cat(x0, dim=0)
+        else:
+            x0 = torch.stack(x0, dim=0)
+
+    # t = sample_timestep(x1)
+    t = torch.ones(B).to(device)
+    t = t.to(model_dtype)
+
+    xt = (1 - t.view(-1, 1, 1, 1)) * x0 + t.view(-1, 1, 1, 1) * x1
+    target_vector_field = x1 - x0
+
+    num_layers = model.module.num_layers # changed for deepspeed
+    num_transformer_layers = num_layers - 1 # exclude final layer
+    intermediate_layer_indices = list(range(num_transformer_layers))
+    per_layer_weights = [1 for _ in intermediate_layer_indices] # tilde w
+    model_output, hidden_states = model(xt, t, **model_kwargs)
+
+    if isinstance(model_output, list):
+        if model_output[0].dim() == 4:
+            model_output = torch.cat(model_output, dim=0)
+        else:
+            model_output = torch.stack(model_output, dim=0)
+
+    terms = {}
+    total_loss = 0.0
+
+    main_loss = torch.stack([((target_vector_field[i] - model_output[i])**2).mean() for i in range(B)], dim=0)
+
+    intermediate_losses = []
+    for layer_idx in intermediate_layer_indices:
+        hidden_state = hidden_states[layer_idx]
+
+        if isinstance(hidden_state, list):
+            if hidden_state[0].dim() == 4:
+                hidden_state = torch.cat(hidden_state, dim=0)
+            else:
+                hidden_state = torch.stack(hidden_state, dim=0)
+
+        layer_loss = torch.stack([per_layer_weights[layer_idx] * ((target_vector_field[i] - hidden_state[i])**2).mean() for i in range(B)], dim=0)
         
         intermediate_losses.append(layer_loss)
 
