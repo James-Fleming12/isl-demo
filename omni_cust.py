@@ -666,17 +666,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             offload_model=False,
         )
 
-        # intermediate_results = []
-        # current = x
-        # for layer_idx in range(self.num_layers):
-        #     denoised_pred = intermediate_preds[layer_idx]
-
-        #     if guidance_scale > 1.0:
-        #         pass
-
-        #     current = denoised_pred
-        #     intermediate_results.append(current.clone())
-
         intermediate_results = [pred.clone() for pred in intermediate_preds]
 
         return final_pred, intermediate_results
@@ -778,7 +767,7 @@ def noise_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patc
     
     return terms
 
-def isl_x0_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """x1 prediction Loss for training the score model
     Args:
     - model: DeepSpeed Model Engine
@@ -856,7 +845,7 @@ def isl_x0_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight
     
     return terms
 
-def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+def isl_flow_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """Flow Matching loss for training the score model
     Args:
     - model: DeepSpeed Model Engine
