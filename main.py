@@ -230,6 +230,7 @@ def main():
             output_images = data['output_images']
             if isinstance(output_images, list):
                 output_images = torch.cat(output_images, dim=0)
+            output_images = output_images.to(device=device, dtype=model_dtype)
 
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:

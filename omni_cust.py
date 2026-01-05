@@ -133,16 +133,21 @@ class JsonFolderDataset(Dataset):
         if self.use_preencoded:
             latent_path = os.path.join(self.latents_folder, f"{key}.pt")
             image = torch.load(latent_path)
+
+            original_height = image.shape[-2] * 8 # for the collator
+            original_width = image.shape[-1] * 8
         else:
             image_path = os.path.join(self.folder_path, f"{key}.png")
             image = Image.open(image_path).convert("RGB")
             image = image.resize((512, 512), resample=Image.BICUBIC)
             if self.image_transform:
                 image = self.image_transform(image)
+            original_height = 512
+            original_width = 512
 
         model_input = self.processor.process_multi_modal_prompt(text, None)
 
-        return model_input, image
+        return model_input, image, (original_height, original_width)
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)

@@ -87,10 +87,10 @@ class TrainDataCollator(OmniGenCollator):
 
     def __call__(self, features):
         mllm_inputs = [f[0] for f in features]
-
         output_images = [f[1].unsqueeze(0) for f in features]
-        target_img_size = [[x.size(-2), x.size(-1)] for x in output_images]
-
+        
+        target_img_size = [f[2] for f in features]
+        
         all_padded_input_ids, all_position_ids, all_attention_mask, all_padding_images, all_pixel_values, all_image_sizes = self.process_mllm_input(mllm_inputs, target_img_size)
 
         if not self.keep_raw_resolution:
@@ -100,17 +100,13 @@ class TrainDataCollator(OmniGenCollator):
             else:
                 all_pixel_values = None
 
-        data = {"input_ids": all_padded_input_ids,
-        "attention_mask": all_attention_mask,
-        "position_ids": all_position_ids,
-        "input_pixel_values": all_pixel_values,
-        "input_image_sizes": all_image_sizes,
-        "padding_images": all_padding_images,
-        "output_images": output_images,
+        data = {
+            "input_ids": all_padded_input_ids,
+            "attention_mask": all_attention_mask,
+            "position_ids": all_position_ids,
+            "input_pixel_values": all_pixel_values,
+            "input_image_sizes": all_image_sizes,
+            "padding_images": all_padding_images,
+            "output_images": output_images,
         }
         return data
-
-
-
-
-
