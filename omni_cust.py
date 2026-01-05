@@ -15,17 +15,24 @@ from OmniGenCode.OmniGen.train_helper.loss import mean_flat, sample_timestep, sa
 from OmniGenCode.OmniGen.transformer import Phi3Config
 
 from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 import json
 from PIL import Image
 
 from cust_phi import BlockPhi3Transformer
 
 class JsonFolderDataset(Dataset):
-    def __init__(self, folder_path, processor, image_transform=None, max_input_length=1024, small_subset=False):
+    def __init__(self, folder_path, processor, vae=None, device='cuda', 
+                 image_transform=None, max_input_length=1024, small_subset=False,
+                 use_preencoded=True, latents_folder=None):
         """
         folder_path: folder containing JSON files and PNGs
         processor: OmniGenProcessor
+        vae: VAE model for encoding (only needed if latents don't exist)
+        device: device for VAE encoding
         image_transform: optional transforms to apply to the images
+        use_preencoded: if True, use pre-encoded latents; if False, encode on-the-fly
+        latents_folder: folder to save/load latents (defaults to folder_path/latents)
         """
         samples_loaded = 1
         max_samples = 1000
@@ -34,7 +41,13 @@ class JsonFolderDataset(Dataset):
         self.processor = processor
         self.image_transform = image_transform
         self.max_input_length = max_input_length
+        self.use_preencoded = use_preencoded
 
+        if latents_folder is None:
+            self.latents_folder = os.path.join(folder_path, "latents")
+        else:
+            self.latents_folder = latents_folder
+        
         self.json_files = sorted([f for f in os.listdir(folder_path) if f.endswith(".json")])
         if not self.json_files:
             raise ValueError("No JSON files found in folder")
@@ -46,7 +59,63 @@ class JsonFolderDataset(Dataset):
             with open(os.path.join(folder_path, jf), "r") as f:
                 item = json.load(f)
                 self.data.append(item)
-            samples_loaded+=1
+            samples_loaded += 1
+
+        if self.use_preencoded:
+            self._setup_latents(vae, device)
+
+    def _setup_latents(self, vae, device):
+        """Pre-encode all images and save latents to disk"""
+        os.makedirs(self.latents_folder, exist_ok=True)
+
+        missing_latents = []
+        for item in self.data:
+            key = item["key"]
+            latent_path = os.path.join(self.latents_folder, f"{key}.pt")
+            if not os.path.exists(latent_path):
+                missing_latents.append((key, item))
+        
+        if not missing_latents:
+            print(f"All {len(self.data)} latents already exist in {self.latents_folder}")
+            return
+        
+        if vae is None:
+            raise ValueError(
+                f"VAE is required to encode {len(missing_latents)} missing latents. "
+                "Either provide a VAE model or set use_preencoded=False"
+            )
+        
+        print(f"Encoding {len(missing_latents)} images to latents...")
+        vae.eval()
+        vae.to(device)
+
+        with torch.no_grad():
+            for i, (key, item) in enumerate(missing_latents):
+                if i % 100 == 0:
+                    print(f"Encoding {i}/{len(missing_latents)}...")
+
+                image_path = os.path.join(self.folder_path, f"{key}.png")
+                image = Image.open(image_path).convert("RGB")
+                image = image.resize((512, 512), resample=Image.BICUBIC)
+                
+                if self.image_transform:
+                    image = self.image_transform(image)
+                else:
+                    transform = transforms.Compose([
+                        transforms.ToTensor(),
+                        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+                    ])
+                    image = transform(image)
+                
+                image = image.unsqueeze(0).to(device)
+
+                latent = vae.encode(image).latent_dist.sample()
+                latent_scaled = latent * vae.config.scaling_factor
+
+                latent_path = os.path.join(self.latents_folder, f"{key}.pt")
+                torch.save(latent_scaled.cpu(), latent_path)
+        
+        print(f"Finished encoding all latents to {self.latents_folder}")
 
     def __len__(self):
         return len(self.data)
@@ -59,11 +128,16 @@ class JsonFolderDataset(Dataset):
             raise ValueError(f"No text found for index {idx}")
 
         key = item["key"]
-        image_path = os.path.join(self.folder_path, f"{key}.png")
-        image = Image.open(image_path).convert("RGB")
-        image = image.resize((512, 512), resample=Image.BICUBIC)
-        if self.image_transform:
-            image = self.image_transform(image)
+        
+        if self.use_preencoded:
+            latent_path = os.path.join(self.latents_folder, f"{key}.pt")
+            image = torch.load(latent_path)
+        else:
+            image_path = os.path.join(self.folder_path, f"{key}.png")
+            image = Image.open(image_path).convert("RGB")
+            image = image.resize((512, 512), resample=Image.BICUBIC)
+            if self.image_transform:
+                image = self.image_transform(image)
 
         model_input = self.processor.process_multi_modal_prompt(text, None)
 

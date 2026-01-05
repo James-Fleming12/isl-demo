@@ -78,17 +78,24 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
     plt.tight_layout()
     plt.savefig("inference_check.png")
 
-def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
+def inference_check(model: CustomOmniGen, data: DataLoader, vae, device=None):
+    """
+    vae is the model for decoding latents back to images
+    """
     num_layers = model.num_layers
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     batch = next(iter(data))
-    output_image = batch["output_images"][0].to(device)
+
+    output_latent = batch["output_images"][0].to(device)
+
+    if output_latent.dim() == 3: # just in case
+        output_latent = output_latent.unsqueeze(0)
 
     padding_latent = batch.get("padding_images", None)
     if padding_latent is not None:
-        padding_latent = [p.to(device=output_image.device) if p is not None else None for p in padding_latent]
+        padding_latent = [p.to(device=output_latent.device) if p is not None else None for p in padding_latent]
 
     model_kwargs = dict(
         input_ids=batch['input_ids'][0:1].to(device),
@@ -97,22 +104,17 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
         attention_mask=batch['attention_mask'][0:1].to(device),
         position_ids=batch['position_ids'][0:1].to(device)
     )
-
-    vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
-    vae.eval()
     
     model_dtype = next(model.parameters()).dtype
-    
+
     with torch.no_grad():
-        gt_latent = vae.encode(output_image).latent_dist.sample()
-        gt_latent_scaled = gt_latent * vae.config.scaling_factor
+        gt_image = vae.decode(output_latent.float() / vae.config.scaling_factor).sample
 
-    model_input = torch.randn_like(gt_latent_scaled).to(model_dtype)
+    model_input = torch.randn_like(output_latent).to(model_dtype)
 
-    # model_output, hidden_states = model.inference(model_input, torch.ones(1, device=device, dtype=model_dtype), **model_kwargs)
     with torch.no_grad():
         generated, intermediate_gen = model.generate(model_input, guidance_scale=1.0, **model_kwargs)
-    intermediate_gen = intermediate_gen[:-1] # removes output layer
+    intermediate_gen = intermediate_gen[:-1]  # removes output layer
 
     decoded_blocks = []
 
@@ -131,21 +133,19 @@ def inference_check(model: CustomOmniGen, data: DataLoader, device = None):
             model_input.float() / vae.config.scaling_factor
         ).sample
 
-    decoded_blocks = decoded_blocks
     decoded_blocks.append(final_decoded)
 
     visualize_block_progression(
         noisy_input=decoded_noise,
         block_outputs=decoded_blocks,
-        ground_truths=[output_image],
-        titles = None
+        ground_truths=[gt_image],
+        titles=None
     )
 
 def main():
     batch_size = 5
     lr = 1e-4
     epochs = 700
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1)
@@ -158,7 +158,6 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
     
-    # model = CustomOmniGen.from_pretrained_other("Shitao/OmniGen-v1")
     config = Phi3Config(
         hidden_size=1536,
         intermediate_size=4096,
@@ -173,27 +172,31 @@ def main():
     model.train()
     
     processor = OmniGenProcessor.from_pretrained("Shitao/OmniGen-v1")
-    vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
-    vae.eval()
-    
-    # optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     
     image_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
-    
-    dataset = JsonFolderDataset("00000", processor, image_transform, small_subset=True)
+
+    vae = None
+    if local_rank == 0:
+        vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
+        vae.eval()
+
+    dataset = JsonFolderDataset("00000", processor, vae=vae, device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
+
+    torch.distributed.barrier() # wait for dataset preprocessing
+
+    if local_rank != 0:
+        dataset = JsonFolderDataset("00000", processor, vae=None,device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
+
     sampler = DistributedSampler(dataset)
-    collate_fn = TrainDataCollator(
-        pad_token_id=processor.text_tokenizer.eos_token_id,
-        hidden_size=model.llm.config.hidden_size,
-        keep_raw_resolution=True
-    )
-    dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
-    
+    collate_fn = TrainDataCollator(pad_token_id=processor.text_tokenizer.eos_token_id, hidden_size=model.llm.config.hidden_size, keep_raw_resolution=True)
+    dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn, shuffle=False,num_workers=0,pin_memory=True)
+
     if local_rank == 0:
         best_loss = float('inf')
+        os.makedirs("logs", exist_ok=True)
         log_file = os.path.join("logs", f"log.txt")
 
     with open(args.deepspeed_config, 'r') as f:
@@ -201,7 +204,7 @@ def main():
 
     deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
 
-    params_to_freeze = [ # freeizing params for deepspeed error
+    params_to_freeze = [
         'input_x_embedder.proj.weight',
         'input_x_embedder.proj.bias',
     ]
@@ -212,11 +215,7 @@ def main():
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    model_engine, optimizer, _, _ = deepspeed.initialize(
-        args=args,
-        model=model,
-        model_parameters=trainable_params,
-    )
+    model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params,)
 
     for epoch in range(epochs):
         total_loss = 0.0
@@ -225,17 +224,13 @@ def main():
         dataloader.sampler.set_epoch(epoch)
 
         for batch_idx, data in enumerate(dataloader):
-            output_images = [img.to(device) for img in data['output_images']]
-            
-            with torch.no_grad():
-                output_images = vae_encode_list(vae, output_images, model.llm.dtype)
-
             model_dtype = next(model_engine.parameters()).dtype
-            output_images = [img.to(model_dtype) for img in output_images]
+
+            output_images = [img.to(device).to(model_dtype) for img in data['output_images']]
 
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:
-                padding_latent = [p.to(device=output_images[0].device) if p is not None else None for p in padding_latent]
+                padding_latent = [p.to(device=device, dtype=model_dtype) if p is not None else None for p in padding_latent]
 
             model_kwargs = dict(
                 input_ids=data['input_ids'].to(device),
@@ -269,11 +264,17 @@ def main():
                 f.write(f"{epoch} {avg_loss}\n")
 
     if local_rank == 0:
+        os.makedirs("models", exist_ok=True)
         torch.save(model_engine.module.state_dict(), f'models/final_model_epoch_{epoch}.pth')
         print(f"Final model saved with loss: {avg_loss:.6f}")
+
+        if vae is None:
+            vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
+            vae.eval()
+        
         model_engine.module.eval()
         with torch.no_grad():
-            inference_check(model_engine.module, dataloader, device=device)
+            inference_check(model_engine.module, dataloader, vae, device=device)
 
 if __name__=="__main__":
     main()
