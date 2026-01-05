@@ -111,6 +111,7 @@ class JsonFolderDataset(Dataset):
 
                 latent = vae.encode(image).latent_dist.sample()
                 latent_scaled = latent * vae.config.scaling_factor
+                latent_scaled = latent_scaled.squeeze(0)
 
                 latent_path = os.path.join(self.latents_folder, f"{key}.pt")
                 torch.save(latent_scaled.cpu(), latent_path)

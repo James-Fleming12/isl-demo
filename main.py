@@ -227,6 +227,10 @@ def main():
         for batch_idx, data in enumerate(dataloader):
             model_dtype = next(model_engine.parameters()).dtype
 
+            output_images = data['output_images']
+            if isinstance(output_images, list):
+                output_images = torch.cat(output_images, dim=0)
+
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:
                 padding_latent = [p.to(device=device, dtype=model_dtype) if p is not None else None for p in padding_latent]
