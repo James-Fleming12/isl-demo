@@ -179,16 +179,18 @@ def main():
     ])
 
     vae = None
+
     if local_rank == 0:
         vae = AutoencoderKL.from_pretrained("stabilityai/sdxl-vae").to(device)
         vae.eval()
 
-    dataset = JsonFolderDataset("00000", processor, vae=vae, device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
-
-    torch.distributed.barrier() # wait for dataset preprocessing
+        dataset = JsonFolderDataset("00000", processor, vae=vae, device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
 
     if local_rank != 0:
         dataset = JsonFolderDataset("00000", processor, vae=None,device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
+
+
+    torch.distributed.barrier() # wait for dataset preprocessing
 
     sampler = DistributedSampler(dataset)
     collate_fn = TrainDataCollator(pad_token_id=processor.text_tokenizer.eos_token_id, hidden_size=model.llm.config.hidden_size, keep_raw_resolution=True)
