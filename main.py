@@ -229,21 +229,13 @@ def main():
 
             output_images = data['output_images']
             if isinstance(output_images, list):
-                output_images = torch.stack(output_images).to(device, dtype=model_dtype)
+                output_images = torch.cat([img.to(device, dtype=model_dtype) for img in output_images], dim=0)
             else:
                 output_images = output_images.to(device, dtype=model_dtype)
 
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:
-                non_none_indices = [i for i, p in enumerate(padding_latent) if p is not None]
-                if non_none_indices:
-                    non_none_paddings = torch.stack([padding_latent[i] for i in non_none_indices])
-                    non_none_paddings = non_none_paddings.to(device=device, dtype=model_dtype)
-
-                    padding_latent_converted = [None] * len(padding_latent)
-                    for idx, orig_idx in enumerate(non_none_indices):
-                        padding_latent_converted[orig_idx] = non_none_paddings[idx]
-                    padding_latent = padding_latent_converted
+                padding_latent = [p.to(device=device, dtype=model_dtype) if p is not None else None for p in padding_latent]
 
             model_kwargs = dict(
                 input_ids=data['input_ids'].to(device),
