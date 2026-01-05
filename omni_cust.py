@@ -488,7 +488,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             num_tokens = latents.size(1)
             shapes = [height, width]
         return latents, num_tokens, shapes
-
     
     def forward(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
         input_is_list = isinstance(x, list)
@@ -514,31 +513,29 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         batch_size = timestep.size(0)
         block_timesteps = []
         num_blocks = len(self.llm.blocks)
-        for b in range(batch_size):
-            # t_schedule = torch.linspace(1.0, 0.0, num_blocks, device=timestep.device, dtype=timestep.dtype)
-            t_schedule = torch.zeros(num_blocks+1, device=timestep.device, dtype=timestep.dtype)
 
-            for i in range(num_blocks):
-                t_schedule[i+1] = 1.0 - (i+1)/(num_blocks+1)
-
-            t_schedule[0] = 1.0
-            t_schedule = t_schedule[:-1]
-
-            block_timesteps.append(t_schedule)
-
-        block_timesteps = torch.stack(block_timesteps, dim=0)
+        t_schedule = torch.zeros(num_blocks + 1, device=timestep.device, dtype=timestep.dtype)
+        t_schedule[0] = 1.0
+        for i in range(num_blocks):
+            t_schedule[i+1] = 1.0 - (i+1)/(num_blocks+1)
+        t_schedule = t_schedule[:-1]
+        
+        block_timesteps = t_schedule.unsqueeze(0).expand(batch_size, -1)
 
         output = self.llm(inputs_embeds=input_emb, block_timesteps=block_timesteps, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
         hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
+
         if input_is_list:
-            image_embedding = output[:, -max(num_tokens):]
+            max_tokens = max(num_tokens)
+            image_embedding = output[:, -max_tokens:]
             time_emb = self.t_embedder(timestep, dtype=x.dtype)
             x = self.final_layer(image_embedding, time_emb)
+
             latents = []
-            for i in range(x.size(0)):
-                latent = x[i:i+1, :num_tokens[i]]
-                latent = self.unpatchify(latent, shapes[i][0], shapes[i][1])
+            for i, (nt, shape) in enumerate(zip(num_tokens, shapes)):
+                latent = x[i:i+1, :nt]
+                latent = self.unpatchify(latent, shape[0], shape[1])
                 latents.append(latent)
         else:
             image_embedding = output[:, -num_tokens:]
@@ -546,40 +543,34 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             x = self.final_layer(image_embedding, time_emb)
             latents = self.unpatchify(x, shapes[0], shapes[1])
 
-        layer_image_embeddings = []
-        for layer_hidden_state in hidden_states:
-            if input_is_list:
-                layer_image_embedding = layer_hidden_state[:, -max(num_tokens):]
-            else:
-                layer_image_embedding = layer_hidden_state[:, -num_tokens:]
-            layer_image_embeddings.append(layer_image_embedding)
+        if input_is_list:
+            max_tokens = max(num_tokens)
+            layer_image_embeddings = [layer_hidden_state[:, -max_tokens:] for layer_hidden_state in hidden_states]
+        else:
+            layer_image_embeddings = [layer_hidden_state[:, -num_tokens:] for layer_hidden_state in hidden_states]
+
+        num_layers = self.num_layers
+        layer_idx_tensor = torch.arange(num_layers, device=timestep.device, dtype=timestep.dtype)
+        hidden_t_schedule = timestep.unsqueeze(1) * (1.0 - layer_idx_tensor[:-1].unsqueeze(0) / (num_blocks + 1))
+        last_layer = torch.zeros(batch_size, 1, device=timestep.device, dtype=timestep.dtype)
+        hidden_timesteps = torch.cat([hidden_t_schedule, last_layer], dim=1)
+
+        all_times = hidden_timesteps.flatten()
+        all_time_embs = self.t_embedder(all_times, dtype=x.dtype)
+        time_embs = all_time_embs.view(batch_size, num_layers, -1)
 
         projected_hidden_states = []
-        batch_size = timestep.size(0)
-        hidden_timesteps = torch.zeros((batch_size, self.num_layers), device=timestep.device, dtype=timestep.dtype)
-        for b in range(batch_size):
-            for i in range(self.num_layers - 1):
-                hidden_timesteps[b, i] = timestep[b] * (1.0 - i/(num_blocks+1))
-
-            hidden_timesteps[b, -1] = 0.0
-
-        time_embs = []
-        for layer_idx in range(self.num_layers):
-            layer_t = hidden_timesteps[:, layer_idx]
-            time_emb = self.t_embedder(layer_t, dtype=x.dtype)
-            time_embs.append(time_emb)
-
-        for i, layer_image_embedding in enumerate(layer_image_embeddings):
-            projected = self.final_layer(layer_image_embedding, time_embs[i])
+        for i, (layer_embedding, layer_time_emb) in enumerate(zip(layer_image_embeddings, time_embs.unbind(dim=1))):
+            projected = self.final_layer(layer_embedding, layer_time_emb)
             projected_hidden_states.append(projected)
 
         unpatched_hidden_states = []
         for i, projected in enumerate(projected_hidden_states):
             if input_is_list:
                 latents_per_layer = []
-                for j in range(projected.size(0)):
-                    latent = projected[j:j+1, :num_tokens[j]]
-                    latent_unpatched = self.unpatchify(latent, shapes[j][0], shapes[j][1])
+                for j, (nt, shape) in enumerate(zip(num_tokens, shapes)):
+                    latent = projected[j:j+1, :nt]
+                    latent_unpatched = self.unpatchify(latent, shape[0], shape[1])
                     latents_per_layer.append(latent_unpatched)
                 unpatched_hidden_states.append(latents_per_layer)
             else:
@@ -767,7 +758,7 @@ def noise_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patc
     
     return terms
 
-def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
+def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None, main_loss_scale=5):
     """x1 prediction Loss for training the score model
     Args:
     - model: DeepSpeed Model Engine
@@ -801,16 +792,16 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
             x0 = torch.stack(x0, dim=0)
 
     # t = sample_timestep(x1)
-    t = torch.ones(B).to(device)
-    t = t.to(model_dtype)
+    t = torch.ones(B, device=device, dtype=model_dtype)
 
-    xt = t.view(-1,1,1,1) * x0 + (1 - t.view(-1,1,1,1)) * x1
+    t_view = t.view(-1, 1, 1, 1)
+    xt = t_view * x0 + (1 - t_view) * x1
     xt = xt.to(model_dtype)
 
     num_layers = model.module.num_layers # changed for deepspeed
     num_transformer_layers = num_layers - 1 # exclude final layer
     intermediate_layer_indices = list(range(num_transformer_layers))
-    per_layer_weights = [1 for _ in intermediate_layer_indices] # tilde w
+    per_layer_weights = torch.ones(len(intermediate_layer_indices)) # tilde w
     model_output, hidden_states = model(xt, t, **model_kwargs)
 
     if isinstance(model_output, list):
@@ -822,7 +813,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     terms = {}
     total_loss = 0.0
 
-    main_loss = torch.stack([((x1[i] - model_output[i])**2).mean() for i in range(B)], dim=0)
+    main_loss = (main_loss_scale * (x1 - model_output) ** 2).mean(dim=tuple(range(1, x1.dim())))
 
     intermediate_losses = []
     for layer_idx in intermediate_layer_indices:
@@ -834,15 +825,14 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
             else:
                 hidden_state = torch.stack(hidden_state, dim=0)
 
-        layer_loss = torch.stack([per_layer_weights[layer_idx] * ((x1[i] - hidden_state[i])**2).mean() for i in range(B)], dim=0)
-        
+        layer_loss = per_layer_weights[layer_idx] * ((x1 - hidden_state) ** 2).mean(dim=tuple(range(1, x1.dim())))
         intermediate_losses.append(layer_loss)
 
-    total_loss = main_loss + sum(intermediate_losses)
+    intermediate_losses_tensor = torch.stack(intermediate_losses, dim=0)
+    total_loss = main_loss + intermediate_losses_tensor.sum(dim=0)
+
     terms["loss"] = total_loss.mean()
-    terms["main_loss"] = main_loss.mean()
-    terms["intermediate_loss"] = sum([loss.mean() for loss in intermediate_losses])
-    
+
     return terms
 
 def isl_flow_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
