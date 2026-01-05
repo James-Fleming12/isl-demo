@@ -186,11 +186,10 @@ def main():
 
         dataset = JsonFolderDataset("00000", processor, vae=vae, device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
 
+    torch.distributed.barrier() # wait for dataset preprocessing
+
     if local_rank != 0:
         dataset = JsonFolderDataset("00000", processor, vae=None,device=device, image_transform=image_transform, small_subset=True, use_preencoded=True)
-
-
-    torch.distributed.barrier() # wait for dataset preprocessing
 
     sampler = DistributedSampler(dataset)
     collate_fn = TrainDataCollator(pad_token_id=processor.text_tokenizer.eos_token_id, hidden_size=model.llm.config.hidden_size, keep_raw_resolution=True)
@@ -228,11 +227,23 @@ def main():
         for batch_idx, data in enumerate(dataloader):
             model_dtype = next(model_engine.parameters()).dtype
 
-            output_images = [img.to(device).to(model_dtype) for img in data['output_images']]
+            output_images = data['output_images']
+            if isinstance(output_images, list):
+                output_images = torch.stack(output_images).to(device, dtype=model_dtype)
+            else:
+                output_images = output_images.to(device, dtype=model_dtype)
 
             padding_latent = data.get("padding_images", None)
             if padding_latent is not None:
-                padding_latent = [p.to(device=device, dtype=model_dtype) if p is not None else None for p in padding_latent]
+                non_none_indices = [i for i, p in enumerate(padding_latent) if p is not None]
+                if non_none_indices:
+                    non_none_paddings = torch.stack([padding_latent[i] for i in non_none_indices])
+                    non_none_paddings = non_none_paddings.to(device=device, dtype=model_dtype)
+
+                    padding_latent_converted = [None] * len(padding_latent)
+                    for idx, orig_idx in enumerate(non_none_indices):
+                        padding_latent_converted[orig_idx] = non_none_paddings[idx]
+                    padding_latent = padding_latent_converted
 
             model_kwargs = dict(
                 input_ids=data['input_ids'].to(device),
