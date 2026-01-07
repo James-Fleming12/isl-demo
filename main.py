@@ -250,12 +250,13 @@ def main():
             loss_dict = isl_training_losses(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
+            # add time check
             model_engine.backward(loss)
             model_engine.step()
 
             loss_tensor = torch.tensor([loss.item()], device=device)
-            torch.distributed.all_reduce(loss_tensor)
-            avg_loss_across = loss_tensor.item() / torch.distributed.get_world_size()
+            # torch.distributed.all_reduce(loss_tensor)
+            # avg_loss_across = loss_tensor.item() / torch.distributed.get_world_size()
 
             total_loss += avg_loss_across
             num_batches += 1
