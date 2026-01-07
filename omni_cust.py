@@ -878,40 +878,30 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     xt = t_view * x0 + (1 - t_view) * x1
     xt = xt.to(model_dtype)
 
-    num_layers = model.module.num_layers # changed for deepspeed
-    num_transformer_layers = num_layers - 1 # exclude final layer
-    intermediate_layer_indices = list(range(num_transformer_layers))
-    per_layer_weights = torch.ones(len(intermediate_layer_indices)) # tilde w
-    model_output, hidden_states = model(xt, t, **model_kwargs)
-
-    if isinstance(model_output, list):
-        if model_output[0].dim() == 4:
-            model_output = torch.cat(model_output, dim=0)
-        else:
-            model_output = torch.stack(model_output, dim=0)
+    _, hidden_states = model(xt, t, **model_kwargs)
+    hidden_states = torch.stack(hidden_states, dim=0)
 
     terms = {}
-    total_loss = 0.0
 
-    main_loss = (main_loss_scale * (x1 - model_output) ** 2).mean(dim=tuple(range(1, x1.dim())))
+    num_layers = hidden_states.size(0)
+    batch_size = x1.shape[0]
 
-    intermediate_losses = []
-    for layer_idx in intermediate_layer_indices:
-        hidden_state = hidden_states[layer_idx]
+    layer_weights = torch.ones(num_layers, device=device, dtype=model_dtype)
+    layer_weights[-1] = 5
 
-        if isinstance(hidden_state, list):
-            if hidden_state[0].dim() == 4:
-                hidden_state = torch.cat(hidden_state, dim=0)
-            else:
-                hidden_state = torch.stack(hidden_state, dim=0)
+    hidden_states = hidden_states.view(-1, *hidden_states.shape[2:])
+    x1_expanded = x1.repeat(num_layers, *([1] * (x1.dim() - 1)))
 
-        layer_loss = per_layer_weights[layer_idx] * ((x1 - hidden_state) ** 2).mean(dim=tuple(range(1, x1.dim())))
-        intermediate_losses.append(layer_loss)
+    squared_diff = (x1_expanded - hidden_states) ** 2
+    spatial_dims = tuple(range(1, squared_diff.dim())) # All dims except dim=0
+    loss = squared_diff.mean(dim=spatial_dims)
 
-    intermediate_losses_tensor = torch.stack(intermediate_losses, dim=0)
-    total_loss = main_loss + intermediate_losses_tensor.sum(dim=0)
+    layer_weights = layer_weights.repeat_interleave(batch_size)
+    weighted_loss = loss * layer_weights
 
-    terms["loss"] = total_loss.mean()
+    loss = weighted_loss.mean()
+
+    terms["loss"] = loss
 
     return terms
 
