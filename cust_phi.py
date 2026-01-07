@@ -880,7 +880,7 @@ class BlockPhi3Transformer(BlockPhi3):
         hidden_states = inputs_embeds
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
+        all_hidden_states = [] if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
@@ -912,7 +912,7 @@ class BlockPhi3Transformer(BlockPhi3):
                     all_self_attns += (layer_outputs[1],)
 
                 if output_hidden_states: # changed to be the output of the i-th layer instead of the input
-                    all_hidden_states += (hidden_states,)
+                    all_hidden_states.append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
 
@@ -996,7 +996,7 @@ class BlockPhi3Transformer(BlockPhi3):
         hidden_states = inputs_embeds
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
+        all_hidden_states = [] if output_hidden_states else None
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
@@ -1023,7 +1023,7 @@ class BlockPhi3Transformer(BlockPhi3):
                     all_self_attns += (layer_outputs[1],)
 
                 if output_hidden_states: # changed to be the output of the i-th layer instead of the input
-                    all_hidden_states += (hidden_states,)
+                    all_hidden_states.append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
 
