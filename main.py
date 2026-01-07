@@ -147,9 +147,11 @@ def main():
     lr = 1e-4
     epochs = 700
 
+    num_gpus = 4
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1)
-    parser.add_argument("--deepspeed_config", type=str, default="ds_config.json")
+    # parser.add_argument("--deepspeed_config", type=str, default="ds_config.json")
     args = parser.parse_args()
 
     deepspeed.init_distributed()
@@ -200,10 +202,15 @@ def main():
         os.makedirs("logs", exist_ok=True)
         log_file = os.path.join("logs", f"log.txt")
 
-    with open(args.deepspeed_config, 'r') as f:
+    with open("ds_config.json", 'r') as f:
         deepspeed_config = json.load(f)
 
-    deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
+    if deepspeed_config.get("train_micro_batch_size_per_gpu") == "auto":
+        deepspeed_config.pop("train_micro_batch_size_per_gpu", None)
+        deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
+    if deepspeed_config.get("train_batch_size") == "auto":
+        deepspeed_config.pop("train_batch_size", None)
+        deepspeed_config["train_batch_size"] = batch_size * num_gpus
 
     params_to_freeze = [
         'input_x_embedder.proj.weight',
@@ -216,7 +223,13 @@ def main():
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params,)
+    optimizer = torch.optim.AdamW(
+        trainable_params,
+        lr=lr,
+        weight_decay=0.01
+    )
+
+    model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params, config=deepspeed_config, optimizer=optimizer)
 
     for epoch in range(epochs):
         total_loss = 0.0
