@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from matplotlib import pyplot as plt
 import torch
 import torch.nn as nn
@@ -206,10 +207,8 @@ def main():
         deepspeed_config = json.load(f)
 
     if deepspeed_config.get("train_micro_batch_size_per_gpu") == "auto":
-        deepspeed_config.pop("train_micro_batch_size_per_gpu", None)
         deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
     if deepspeed_config.get("train_batch_size") == "auto":
-        deepspeed_config.pop("train_batch_size", None)
         deepspeed_config["train_batch_size"] = batch_size * num_gpus
 
     params_to_freeze = [
@@ -228,7 +227,7 @@ def main():
         lr=lr,
         weight_decay=0.01
     )
-
+    
     model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params, config=deepspeed_config, optimizer=optimizer)
 
     for epoch in range(epochs):
@@ -237,7 +236,13 @@ def main():
         
         dataloader.sampler.set_epoch(epoch)
 
+        if local_rank == 0: end_time = time.perf_counter()
+
         for batch_idx, data in enumerate(dataloader):
+            if local_rank == 0:
+                start_time = time.perf_counter()
+                print(f"Time between end of last loop and start of this: {start_time-end_time}")
+
             model_dtype = next(model_engine.parameters()).dtype
 
             output_images = data['output_images']
@@ -259,20 +264,34 @@ def main():
                 past_key_values=None,
                 return_past_key_values=False
             )
-            
+
+            if local_rank == 0:
+                process_time = time.perf_counter()
+                print(f"Time for Processing: {process_time}")
+
             loss_dict = isl_training_losses(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
-            # add time check
+            if local_rank == 0:
+                forward_time = time.perf_counter()
+                print(f"Time for Forward Pass: {forward_time-process_time}")
+
             model_engine.backward(loss)
             model_engine.step()
 
-            loss_tensor = torch.tensor([loss.item()], device=device)
+            if local_rank == 0:
+                step_time = time.perf_counter()
+                print(f"Time for Model Step: {step_time-forward_time}")
+
+            # loss_tensor = torch.tensor([loss.item()], device=device)
             # torch.distributed.all_reduce(loss_tensor)
             # avg_loss_across = loss_tensor.item() / torch.distributed.get_world_size()
 
-            total_loss += avg_loss_across
-            num_batches += 1
+            # total_loss += avg_loss_across
+            # num_batches += 1
+
+            if local_rank == 0:
+                end_time = time.perf_counter()
 
         avg_loss = total_loss / num_batches
 
