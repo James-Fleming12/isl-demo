@@ -143,7 +143,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, vae, device=None):
     )
 
 def main():
-    batch_size = 5
+    batch_size = 16
     lr = 1e-4
     epochs = 700
 
