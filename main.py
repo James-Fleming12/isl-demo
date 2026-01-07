@@ -288,7 +288,7 @@ def main():
             # avg_loss_across = loss_tensor.item() / torch.distributed.get_world_size()
 
             # total_loss += avg_loss_across
-            # num_batches += 1
+            num_batches += 1
 
             if local_rank == 0:
                 end_time = time.perf_counter()
