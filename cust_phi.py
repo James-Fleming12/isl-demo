@@ -19,6 +19,8 @@ from transformers.models.phi3.modeling_phi3 import Phi3DecoderLayer, Phi3RMSNorm
 
 from OmniGenCode.OmniGen.model import TimestepEmbedder
 
+from diffusers import DDIMScheduler
+
 logger = logging.get_logger(__name__)
 
 class QuarterBlockPhi3(Phi3PreTrainedModel):
@@ -904,33 +906,123 @@ class BlockPhi3Transformer(BlockPhi3):
                 )
 
                 hidden_states = layer_outputs[0]
-                
-                if use_cache:
-                    next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
-                if output_attentions:
-                    all_self_attns += (layer_outputs[1],)
-
-                if output_hidden_states: # changed to be the output of the i-th layer instead of the input
-                    all_hidden_states.append(hidden_states)
+            if output_hidden_states: # changed to be the output of the i-th layer instead of the input
+                all_hidden_states.append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
-
-        # # add hidden states from the last decoder layer
-        # if output_hidden_states:
-        #     all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=next_cache,
             hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+        )
+    
+    def scheduled(
+        self,
+        input_ids: torch.LongTensor = None,
+        num_tokens: List[int] | int = None,
+        scheduler: DDIMScheduler = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        offload_model: Optional[bool] = False,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                )
+                use_cache = False
+
+        if attention_mask is not None and attention_mask.dim() == 3:
+            dtype = inputs_embeds.dtype
+            min_dtype = torch.finfo(dtype).min
+            attention_mask = (1 - attention_mask) * min_dtype
+            attention_mask = attention_mask.unsqueeze(1).to(inputs_embeds.dtype)
+        else:
+            raise Exception("attention_mask parameter was unavailable or invalid")
+
+        hidden_states = inputs_embeds
+
+        all_hidden_states = [] if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = None
+
+        layer_idx = -1
+
+        timesteps = scheduler.timesteps
+
+        for index, block in enumerate(self.blocks):
+            current_timestep = timesteps[index]
+
+            noise = torch.randn_like(hidden_states)
+            timestep_tensor = torch.full(
+                (hidden_states.shape[0],), 
+                current_timestep, 
+                device=hidden_states.device,
+                dtype=torch.long
+            )
+
+            noisy_hidden_states = scheduler.add_noise(hidden_states, noise, timestep_tensor)
+
+            if hasattr(self, 'block_time_embedders'):
+                time_emb = self.block_time_embedders[index](
+                    timestep_tensor.float(), 
+                    dtype=noisy_hidden_states.dtype
+                )
+                noisy_hidden_states = noisy_hidden_states + time_emb.unsqueeze(1)
+
+            hidden_states = noisy_hidden_states
+
+            for layer in block:
+                layer_idx += 1
+                layer_outputs = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                )
+
+                hidden_states = layer_outputs[0]
+
+            if output_hidden_states: # changed to be the output of the i-th layer instead of the input
+                all_hidden_states.append(hidden_states)
+
+        hidden_states = self.norm(hidden_states)
+
+        next_cache = next_decoder_cache if use_cache else None
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            hidden_states=all_hidden_states
         )
     
     def inference(

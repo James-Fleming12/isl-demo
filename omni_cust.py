@@ -20,6 +20,7 @@ import json
 from PIL import Image
 
 from cust_phi import BlockPhi3Transformer
+from diffusers import DDIMScheduler
 
 class JsonFolderDataset(Dataset):
     def __init__(self, folder_path, processor, vae=None, device='cuda', 
@@ -661,6 +662,99 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             return latents, past_key_values
         return latents, unpatched_hidden_states
     
+    def scheduled(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
+        input_is_list = isinstance(x, list)
+        x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
+
+        scheduler = DDIMScheduler(
+            num_train_timesteps=1000,
+            beta_start=0.0001,
+            beta_end=0.02,
+            beta_schedule="linear",
+            prediction_type="sample", # for x0 prediction
+            clip_sample=True,
+            set_alpha_to_one=True,
+            steps_offset=0,
+        )
+        scheduler.set_timesteps(self.num_layers)
+        timestep = scheduler.timesteps[0]
+        timestep = torch.full((x.shape[0],), timestep, device=x.device)
+
+        time_token = self.time_token(timestep, dtype=x.dtype).unsqueeze(1)
+        
+        if input_img_latents is not None:
+            input_latents, _, _ = self.patch_multiple_resolutions(input_img_latents, is_input_images=True)
+        if input_ids is not None:
+            condition_embeds = self.llm.embed_tokens(input_ids).clone()
+            input_img_inx = 0
+            for b_inx in input_image_sizes.keys():
+                for start_inx, end_inx in input_image_sizes[b_inx]:
+                    condition_embeds[b_inx, start_inx: end_inx] = input_latents[input_img_inx]
+                    input_img_inx += 1
+            if input_img_latents is not None:
+                assert input_img_inx == len(input_latents) 
+
+            input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
+        else:
+            input_emb = torch.cat([time_token, x], dim=1)
+            
+        batch_size = timestep.size(0)
+
+        output = self.llm(inputs_embeds=input_emb, scheduler=scheduler, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        hidden_states = output.hidden_states
+        output, past_key_values = output.last_hidden_state, output.past_key_values
+
+        if input_is_list:
+            max_tokens = max(num_tokens)
+            image_embedding = output[:, -max_tokens:]
+            time_emb = self.t_embedder(timestep, dtype=x.dtype)
+            x = self.final_layer(image_embedding, time_emb)
+
+            latents = []
+            for i, (nt, shape) in enumerate(zip(num_tokens, shapes)):
+                latent = x[i:i+1, :nt]
+                latent = self.unpatchify(latent, shape[0], shape[1])
+                latents.append(latent)
+        else:
+            image_embedding = output[:, -num_tokens:]
+            time_emb = self.t_embedder(timestep, dtype=x.dtype)
+            x = self.final_layer(image_embedding, time_emb)
+            latents = self.unpatchify(x, shapes[0], shapes[1])
+
+        if input_is_list:
+            max_tokens = max(num_tokens)
+            layer_image_embeddings = [layer_hidden_state[:, -max_tokens:] for layer_hidden_state in hidden_states]
+        else:
+            layer_image_embeddings = [layer_hidden_state[:, -num_tokens:] for layer_hidden_state in hidden_states]
+
+        num_layers = self.num_layers
+
+        hidden_t_schedule = scheduler.timesteps
+        all_time_embs = self.t_embedder(hidden_t_schedule, dtype=x.dtype)
+        time_embs = all_time_embs.view(batch_size, num_layers, -1)
+
+        projected_hidden_states = []
+        for i, (layer_embedding, layer_time_emb) in enumerate(zip(layer_image_embeddings, time_embs.unbind(dim=1))):
+            projected = self.final_layer(layer_embedding, layer_time_emb)
+            projected_hidden_states.append(projected)
+
+        unpatched_hidden_states = []
+        for i, projected in enumerate(projected_hidden_states):
+            if input_is_list:
+                latents_per_layer = []
+                for j, (nt, shape) in enumerate(zip(num_tokens, shapes)):
+                    latent = projected[j:j+1, :nt]
+                    latent_unpatched = self.unpatchify(latent, shape[0], shape[1])
+                    latents_per_layer.append(latent_unpatched)
+                unpatched_hidden_states.append(latents_per_layer)
+            else:
+                latent_unpatched = self.unpatchify(projected, shapes[0], shapes[1])
+                unpatched_hidden_states.append(latent_unpatched)
+
+        if return_past_key_values:
+            return latents, past_key_values
+        return latents, unpatched_hidden_states
+    
     @torch.no_grad()
     def forward_with_cfg(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, cfg_scale, use_img_cfg, img_cfg_scale, past_key_values, use_kv_cache, offload_model):      
         self.llm.config.use_cache = use_kv_cache
@@ -879,6 +973,73 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
     xt = xt.to(model_dtype)
 
     _, hidden_states = model(xt, t, **model_kwargs)
+    hidden_states = torch.stack(hidden_states, dim=0)
+
+    terms = {}
+
+    num_layers = hidden_states.size(0)
+    batch_size = x1.shape[0]
+
+    layer_weights = torch.ones(num_layers, device=device, dtype=model_dtype)
+    layer_weights[-1] = 5
+
+    hidden_states = hidden_states.view(-1, *hidden_states.shape[2:])
+    x1_expanded = x1.repeat(num_layers, *([1] * (x1.dim() - 1)))
+
+    squared_diff = (x1_expanded - hidden_states) ** 2
+    spatial_dims = tuple(range(1, squared_diff.dim())) # All dims except dim=0
+    loss = squared_diff.mean(dim=spatial_dims)
+
+    layer_weights = layer_weights.repeat_interleave(batch_size)
+    weighted_loss = loss * layer_weights
+
+    loss = weighted_loss.mean()
+
+    terms["loss"] = loss
+
+    return terms
+
+def isl_training_losses_scheduled(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None, main_loss_scale=5):
+    """x1 prediction Loss for training the score model
+    Args:
+    - model: DeepSpeed Model Engine
+    - x1: clean datapoint (can be list of tensors or tensor)
+    - model_kwargs: additional arguments for torch model
+
+    Trains the model to have each block predict a quarter of the movement
+    """
+    if model_kwargs == None:
+        model_kwargs = {}
+    
+    if isinstance(x1, list):
+        if x1[0].dim() == 4:
+            x1 = torch.cat(x1, dim=0)
+        else:
+            x1 = torch.stack(x1, dim=0)
+
+    device = x1.device
+    model_dtype = next(model.parameters()).dtype
+
+    B = x1.shape[0]
+    x0 = sample_x0(x1)
+
+    x0 = x0.to(model_dtype)
+    x1 = x1.to(model_dtype)
+
+    if isinstance(x0, list):
+        if x0[0].dim() == 4:
+            x0 = torch.cat(x0, dim=0)
+        else:
+            x0 = torch.stack(x0, dim=0)
+
+    # t = sample_timestep(x1)
+    t = torch.ones(B, device=device, dtype=model_dtype)
+
+    t_view = t.view(-1, 1, 1, 1)
+    xt = t_view * x0 + (1 - t_view) * x1
+    xt = xt.to(model_dtype)
+
+    _, hidden_states = model.scheduled(xt, t, **model_kwargs)
     hidden_states = torch.stack(hidden_states, dim=0)
 
     terms = {}

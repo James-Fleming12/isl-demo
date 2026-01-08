@@ -14,7 +14,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 
-from omni_cust import CustomOmniGen, JsonFolderDataset, isl_training_losses
+from omni_cust import CustomOmniGen, JsonFolderDataset, isl_training_losses, isl_training_losses_scheduled
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.utils import vae_encode, vae_encode_list
 from transformers import Phi3Config
@@ -269,7 +269,7 @@ def main():
                 process_time = time.perf_counter()
                 print(f"Time for Processing: {process_time}")
 
-            loss_dict = isl_training_losses(model_engine, output_images, model_kwargs=model_kwargs)
+            loss_dict = isl_training_losses_scheduled(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
             if local_rank == 0:
