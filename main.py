@@ -144,7 +144,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, vae, device=None):
     )
 
 def main():
-    batch_size = 16
+    batch_size = 4 # temporary for DeepSpeed memory issues
     lr = 1e-4
     epochs = 700
 

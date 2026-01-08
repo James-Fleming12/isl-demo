@@ -677,7 +677,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             steps_offset=0,
         )
         scheduler.set_timesteps(self.num_layers)
-        timestep = scheduler.timesteps[0]
+        timestep = scheduler.timesteps[0].to(x.device)
         timestep = torch.full((x.shape[0],), timestep, device=x.device)
 
         time_token = self.time_token(timestep, dtype=x.dtype).unsqueeze(1)
@@ -700,7 +700,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             
         batch_size = timestep.size(0)
 
-        output = self.llm(inputs_embeds=input_emb, scheduler=scheduler, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        output = self.llm.scheduled(inputs_embeds=input_emb, scheduler=scheduler, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
         hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
 
@@ -729,8 +729,9 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         num_layers = self.num_layers
 
-        hidden_t_schedule = scheduler.timesteps
-        all_time_embs = self.t_embedder(hidden_t_schedule, dtype=x.dtype)
+        hidden_t_schedule = scheduler.timesteps.to(device=x.device)
+        all_timesteps = hidden_t_schedule.unsqueeze(0).expand(batch_size, -1).flatten()
+        all_time_embs = self.t_embedder(all_timesteps, dtype=x[0].dtype if input_is_list else x.dtype)
         time_embs = all_time_embs.view(batch_size, num_layers, -1)
 
         projected_hidden_states = []
