@@ -662,7 +662,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             return latents, past_key_values
         return latents, unpatched_hidden_states
     
-    def scheduled(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
+    def scheduled(self, x, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
 
@@ -821,6 +821,38 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         final_pred, intermediate_preds = self.forward(
             x=x,
             timestep=timestep,
+            input_ids=input_ids,
+            input_img_latents=input_img_latents,
+            input_image_sizes=input_image_sizes,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            padding_latent=None,
+            past_key_values=None,
+            return_past_key_values=False,
+            offload_model=False,
+        )
+
+        intermediate_results = [pred.clone() for pred in intermediate_preds]
+
+        return final_pred, intermediate_results
+    
+    @torch.no_grad()
+    def scheduled_generate(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        input_img_latents: Optional[torch.Tensor],
+        input_image_sizes: dict,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        guidance_scale: float = 1.0,
+        generator: Optional[torch.Generator] = None,
+    ):
+        B = x.shape[0]
+        device = x.device
+
+        final_pred, intermediate_preds = self.scheduled(
+            x=x,
             input_ids=input_ids,
             input_img_latents=input_img_latents,
             input_image_sizes=input_image_sizes,

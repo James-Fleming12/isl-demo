@@ -114,7 +114,8 @@ def inference_check(model: CustomOmniGen, data: DataLoader, vae, device=None):
     model_input = torch.randn_like(output_latent).to(model_dtype)
 
     with torch.no_grad():
-        generated, intermediate_gen = model.generate(model_input, guidance_scale=1.0, **model_kwargs)
+        # generated, intermediate_gen = model.generate(model_input, guidance_scale=1.0, **model_kwargs)
+        generated, intermediate_gen = model.scheduled_generate(model_input, guidance_scale=1.0, **model_kwargs)
     intermediate_gen = intermediate_gen[:-1]  # removes output layer
 
     decoded_blocks = []

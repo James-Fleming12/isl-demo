@@ -968,7 +968,6 @@ class BlockPhi3Transformer(BlockPhi3):
         hidden_states = inputs_embeds
 
         all_hidden_states = [] if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
         layer_idx = -1
@@ -981,7 +980,7 @@ class BlockPhi3Transformer(BlockPhi3):
             noise = torch.randn_like(hidden_states)
             timestep_tensor = torch.full(
                 (hidden_states.shape[0],), 
-                current_timestep, 
+                current_timestep,
                 device=hidden_states.device,
                 dtype=torch.long
             )
@@ -1015,8 +1014,6 @@ class BlockPhi3Transformer(BlockPhi3):
                 all_hidden_states.append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
-
-        next_cache = next_decoder_cache if use_cache else None
 
         if not return_dict:
             return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
