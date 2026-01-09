@@ -572,7 +572,7 @@ class BlockPhi3(Phi3PreTrainedModel):
         self.embed_dropout = nn.Dropout(config.embd_pdrop)
         self.layers = nn.ModuleList([Phi3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
-        self.t_embedder = t_embedder
+        self._t_embedder = t_embedder
 
         self._attn_implementation = config._attn_implementation
         self.norm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -884,7 +884,7 @@ class BlockPhi3Transformer(BlockPhi3):
         for index, layer in enumerate(self.layers):
             if block_timesteps is not None:
                 current_t = block_timesteps[:, index]
-                time_emb = self.t_embedder(current_t, dtype=hidden_states.dtype)
+                time_emb = self._t_embedder(current_t, dtype=hidden_states.dtype)
                 hidden_states = hidden_states + time_emb.unsqueeze(1)
 
             layer_idx += 1
@@ -980,7 +980,7 @@ class BlockPhi3Transformer(BlockPhi3):
 
             noisy_hidden_states = scheduler.add_noise(hidden_states, noise, timestep_tensor)
 
-            time_emb = self.t_embedder(
+            time_emb = self._t_embedder(
                 timestep_tensor.float(), 
                 dtype=noisy_hidden_states.dtype
             )
