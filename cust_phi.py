@@ -571,11 +571,9 @@ class BlockPhi3(Phi3PreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.embed_dropout = nn.Dropout(config.embd_pdrop)
         num_layers = config.num_hidden_layers
-        # assert num_layers % 8 == 0, f"Number of layers ({num_layers}) must be divisible by 8"
-        self.blocks = nn.ModuleList([
-            nn.ModuleList([Phi3DecoderLayer(config, layer_idx)])
-            for layer_idx in range(num_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [Phi3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
 
         self.block_time_embedders = nn.ModuleList([TimestepEmbedder(config.hidden_size) for _ in range(num_layers)])
 
@@ -883,29 +881,27 @@ class BlockPhi3Transformer(BlockPhi3):
 
         # decoder layers
         all_hidden_states = [] if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
         layer_idx = -1
-        for index, block in enumerate(self.blocks):
+        for index, layer in enumerate(self.layers):
             if block_timesteps is not None:
                 current_t = block_timesteps[:, index]
                 time_emb = self.block_time_embedders[index](current_t, dtype=hidden_states.dtype)
                 hidden_states = hidden_states + time_emb.unsqueeze(1)
 
-            for layer in block:
-                layer_idx += 1
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                )
+            layer_idx += 1
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
 
-                hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs[0]
 
             if output_hidden_states: # changed to be the output of the i-th layer instead of the input
                 all_hidden_states.append(hidden_states)
@@ -974,7 +970,7 @@ class BlockPhi3Transformer(BlockPhi3):
 
         timesteps = scheduler.timesteps
 
-        for index, block in enumerate(self.blocks):
+        for index, layer in enumerate(self.layers):
             current_timestep = timesteps[index]
 
             noise = torch.randn_like(hidden_states)
@@ -996,19 +992,18 @@ class BlockPhi3Transformer(BlockPhi3):
 
             hidden_states = noisy_hidden_states
 
-            for layer in block:
-                layer_idx += 1
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                )
+            layer_idx += 1
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
 
-                hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs[0]
 
             if output_hidden_states: # changed to be the output of the i-th layer instead of the input
                 all_hidden_states.append(hidden_states)
@@ -1089,30 +1084,27 @@ class BlockPhi3Transformer(BlockPhi3):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
-        layer_idx = -1
-        for block in self.blocks:
-            for layer in block:
-                layer_idx += 1
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                )
+        for layer in self.layers:
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
 
-                hidden_states = layer_outputs[0]
-                
-                if use_cache:
-                    next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+            hidden_states = layer_outputs[0]
+            
+            if use_cache:
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
 
-                if output_attentions:
-                    all_self_attns += (layer_outputs[1],)
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
 
-                if output_hidden_states: # changed to be the output of the i-th layer instead of the input
-                    all_hidden_states.append(hidden_states)
+            if output_hidden_states: # changed to be the output of the i-th layer instead of the input
+                all_hidden_states.append(hidden_states)
 
         hidden_states = self.norm(hidden_states)
 

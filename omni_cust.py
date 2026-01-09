@@ -335,134 +335,6 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         model.load_state_dict(ckpt)
         return model
 
-    @staticmethod
-    def _map_omni_to_custom_state_dict(omni_state_dict: Dict[str, Any], custom_state_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Maps OmniGen checkpoint (with Phi3Model.layers) to CustomOmniGen 
-        (with QuarterBlockPhi3Transformer.block1/2/3/4).
-        
-        Args:
-            omni_state_dict: State dict from original OmniGen checkpoint
-            custom_state_dict: State dict from CustomOmniGen model (used for structure reference)
-        
-        Returns:
-            Mapped state dict compatible with CustomOmniGen
-        """
-        mapped_state_dict = {}
-
-        target_format = None
-        has_blocks_modulelist = False
-        has_blocks_direct = False
-        
-        for key in custom_state_dict.keys():
-            if 'llm.blocks.' in key and not has_blocks_modulelist:
-                parts = key.split('.')
-                if len(parts) >= 3 and parts[1] == 'blocks' and parts[2].isdigit():
-                    has_blocks_modulelist = True
-            elif any(f'llm.block{i}.' in key for i in range(1, 5)):
-                has_blocks_direct = True
-
-        if has_blocks_modulelist:
-            target_format = 'blocks_modulelist'
-        elif has_blocks_direct:
-            target_format = 'blocks_direct'
-        
-        if target_format is None:
-            print("Warning: Could not determine target format from custom_state_dict")
-            return omni_state_dict
-        
-        print(f"Detected target format: {target_format}")
-
-        num_layers = None
-        for key in omni_state_dict.keys():
-            if key.startswith('llm.layers.'):
-                layer_idx = int(key.split('.')[2])
-                if num_layers is None or layer_idx >= num_layers:
-                    num_layers = layer_idx + 1
-        
-        if num_layers is None:
-            print("Warning: Could not determine number of layers, attempting direct mapping")
-            return omni_state_dict
-
-        print(f"Mapping {num_layers} layers (1 per block)")
-
-        for key, value in omni_state_dict.items():
-            if key.startswith('llm.layers.'):
-                parts = key.split('.')
-                layer_idx = int(parts[2])
-                param_path = '.'.join(parts[3:])
-
-                block_idx = layer_idx
-                new_idx = 0
-
-                if target_format == 'blocks_modulelist':
-                    new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
-                    mapped_state_dict[new_key] = value
-                else:
-                    new_key = f'llm.blocks.{block_idx}.{new_idx}.{param_path}'
-                    mapped_state_dict[new_key] = value
-                    
-            elif key.startswith('llm.'):
-                mapped_state_dict[key] = value
-            else:
-                mapped_state_dict[key] = value
-
-        mapped_layer_keys = [k for k in mapped_state_dict.keys() if 'llm.block' in k]
-
-        missing_keys = set(custom_state_dict.keys()) - set(mapped_state_dict.keys())
-        unexpected_keys = set(mapped_state_dict.keys()) - set(custom_state_dict.keys())
-        
-        if missing_keys:
-            print(f"Warning: {len(missing_keys)} missing keys in mapped state dict")
-            print(f"First few missing keys: {list(missing_keys)[:5]}")
-        if unexpected_keys:
-            print(f"Warning: {len(unexpected_keys)} unexpected keys in mapped state dict")
-            print(f"First few unexpected keys: {list(unexpected_keys)[:5]}")
-        
-        return mapped_state_dict
-
-    @classmethod
-    def from_pretrained_other(cls, model_name: str, map_llm_params: bool = True, strict: bool = True):
-        """
-        Load OmniGen checkpoint into CustomOmniGen model.
-        
-        Args:
-            model_name: Path or repo ID of OmniGen model
-            map_llm_params: If True, map llm.layers to llm.blockN structure
-            strict: Whether to strictly enforce state dict key matching
-        
-        Returns:
-            CustomOmniGen model loaded with weights from OmniGen checkpoint
-        """
-        if not os.path.exists(model_name):
-            cache_folder = os.getenv('HF_HUB_CACHE')
-            model_name = snapshot_download(
-                repo_id=model_name, 
-                cache_dir=cache_folder, 
-                ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
-            )
-        config = Phi3Config.from_pretrained(model_name)
-        model = cls(config)
-
-        if os.path.exists(os.path.join(model_name, 'model.safetensors')):
-            print("Loading safetensors from OmniGen snapshot")
-            ckpt = load_file(os.path.join(model_name, 'model.safetensors'))
-        else:
-            ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
-        
-        if not map_llm_params:
-            try:
-                model.load_state_dict(ckpt, strict=strict)
-            except RuntimeError as e:
-                print(f"Direct loading failed: {e}")
-                print("Try with map_llm_params=True to map transformer weights")
-                raise
-        else:
-            mapped_ckpt = cls._map_omni_to_custom_state_dict(ckpt, model.state_dict())
-            model.load_state_dict(mapped_ckpt, strict=strict)
-        
-        return model
-
     def initialize_weights(self):
         assert not hasattr(self, "llama")
 
@@ -1072,7 +944,7 @@ def isl_training_losses_scheduled(model, x1, model_kwargs=None, snr_type='unifor
     xt = t_view * x0 + (1 - t_view) * x1
     xt = xt.to(model_dtype)
 
-    _, hidden_states = model.scheduled(xt, t, **model_kwargs)
+    _, hidden_states = model.scheduled(xt, **model_kwargs)
     hidden_states = torch.stack(hidden_states, dim=0)
 
     terms = {}

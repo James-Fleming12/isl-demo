@@ -161,15 +161,8 @@ def main():
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
-    
-    config = Phi3Config(
-        hidden_size=1536,
-        intermediate_size=4096,
-        num_hidden_layers=16,
-        num_attention_heads=16,
-        num_key_value_heads=8
-    )
-    model = CustomOmniGen(config)
+
+    model = CustomOmniGen.from_pretrained("Shitao/OmniGen-v1")
     model.llm.config.use_cache = False
     model.llm.gradient_checkpointing_enable()
     model.to(device)
