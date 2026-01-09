@@ -563,7 +563,7 @@ class BlockPhi3(Phi3PreTrainedModel):
         config: Phi3Config
     """
 
-    def __init__(self, config: Phi3Config, t_embedder: TimestepEmbedder):
+    def __init__(self, config: Phi3Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -571,8 +571,6 @@ class BlockPhi3(Phi3PreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.embed_dropout = nn.Dropout(config.embd_pdrop)
         self.layers = nn.ModuleList([Phi3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-
-        self._t_embedder = t_embedder
 
         self._attn_implementation = config._attn_implementation
         self.norm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -814,7 +812,7 @@ class BlockPhi3Transformer(BlockPhi3):
     def forward(
         self,
         input_ids: torch.LongTensor = None,
-        # block_inputs: List[torch.Tensor] = None,
+        t_embedder: TimestepEmbedder = None,
         block_timesteps: Optional[torch.Tensor] = None,
         num_tokens: List[int] | int = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -838,6 +836,9 @@ class BlockPhi3Transformer(BlockPhi3):
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+    
+        if (t_embedder is None):
+            raise ValueError("You must pass a Time Embedder to forward")
         
         # if block_inputs is None:
         #     raise ValueError("Per Block Inputs not given")
@@ -884,7 +885,7 @@ class BlockPhi3Transformer(BlockPhi3):
         for index, layer in enumerate(self.layers):
             if block_timesteps is not None:
                 current_t = block_timesteps[:, index]
-                time_emb = self._t_embedder(current_t, dtype=hidden_states.dtype)
+                time_emb = t_embedder(current_t, dtype=hidden_states.dtype)
                 hidden_states = hidden_states + time_emb.unsqueeze(1)
 
             layer_idx += 1
@@ -920,6 +921,7 @@ class BlockPhi3Transformer(BlockPhi3):
         self,
         input_ids: torch.LongTensor = None,
         num_tokens: List[int] | int = None,
+        t_embedder: TimestepEmbedder = None,
         scheduler: DDIMScheduler = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -942,6 +944,9 @@ class BlockPhi3Transformer(BlockPhi3):
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        
+        if (t_embedder is None):
+            raise ValueError("You must pass t_embedder to scheduled")
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
@@ -980,7 +985,7 @@ class BlockPhi3Transformer(BlockPhi3):
 
             noisy_hidden_states = scheduler.add_noise(hidden_states, noise, timestep_tensor)
 
-            time_emb = self._t_embedder(
+            time_emb = t_embedder(
                 timestep_tensor.float(), 
                 dtype=noisy_hidden_states.dtype
             )

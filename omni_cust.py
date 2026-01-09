@@ -313,7 +313,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         self.initialize_weights()
 
-        self.llm = BlockPhi3Transformer(transformer_config, self.t_embedder)
+        self.llm = BlockPhi3Transformer(transformer_config)
         self.llm.config.use_cache = False
 
         self.num_layers = transformer_config.num_hidden_layers + 1
