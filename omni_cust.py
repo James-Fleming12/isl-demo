@@ -319,20 +319,52 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         self.num_layers = transformer_config.num_hidden_layers + 1
     
     @classmethod
-    def from_pretrained(cls, model_name):
+    def from_pretrained(cls, model_name: str, cache_dir: str = None):
+        """
+        Load CustomOmniGen checkpoint with caching support.
+        
+        Args:
+            model_name: Path or repo ID of the model
+            cache_dir: Optional cache directory (defaults to HF_HUB_CACHE env var)
+        
+        Returns:
+            CustomOmniGen model loaded with weights
+        """
+        if cache_dir is None:
+            cache_dir = os.getenv('HF_HUB_CACHE')
+
         if not os.path.exists(model_name):
-            cache_folder = os.getenv('HF_HUB_CACHE')
-            model_name = snapshot_download(repo_id=model_name,
-                                           cache_dir=cache_folder,
-                                           ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5'])
+            print(f"Downloading model from {model_name}...")
+            model_name = snapshot_download(
+                repo_id=model_name,
+                cache_dir=cache_dir,
+                ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
+            )
+            print(f"Model cached at: {model_name}")
+        else:
+            print(f"Loading model from local path: {model_name}")
+
         config = Phi3Config.from_pretrained(model_name)
         model = cls(config)
-        if os.path.exists(os.path.join(model_name, 'model.safetensors')):
-            print("Loading safetensors")
-            ckpt = load_file(os.path.join(model_name, 'model.safetensors'))
+
+        safetensors_path = os.path.join(model_name, 'model.safetensors')
+        pt_path = os.path.join(model_name, 'model.pt')
+        
+        if os.path.exists(safetensors_path):
+            print("Loading safetensors checkpoint")
+            ckpt = load_file(safetensors_path)
+        elif os.path.exists(pt_path):
+            print("Loading PyTorch checkpoint")
+            ckpt = torch.load(pt_path, map_location='cpu')
         else:
-            ckpt = torch.load(os.path.join(model_name, 'model.pt'), map_location='cpu')
+            raise FileNotFoundError(
+                f"No checkpoint found at {model_name}. "
+                f"Expected either 'model.safetensors' or 'model.pt'"
+            )
+
         model.load_state_dict(ckpt)
+        print("Model loaded successfully")
+        
         return model
 
     def initialize_weights(self):
@@ -475,7 +507,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
         
         block_timesteps = t_schedule.unsqueeze(0).expand(batch_size, -1)
 
-        output = self.llm(inputs_embeds=input_emb, block_timesteps=block_timesteps, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        output = self.llm(inputs_embeds=input_emb, t_embedder=self.t_embedder, block_timesteps=block_timesteps, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
         hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
 
@@ -572,7 +604,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             
         batch_size = timestep.size(0)
 
-        output = self.llm.scheduled(inputs_embeds=input_emb, scheduler=scheduler, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
+        output = self.llm.scheduled(inputs_embeds=input_emb, t_embedder=self.t_embedder, scheduler=scheduler, num_tokens=num_tokens, attention_mask=attention_mask, position_ids=position_ids, past_key_values=past_key_values, offload_model=offload_model, output_hidden_states=True)
         hidden_states = output.hidden_states
         output, past_key_values = output.last_hidden_state, output.past_key_values
 
