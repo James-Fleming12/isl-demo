@@ -571,11 +571,9 @@ class BlockPhi3(Phi3PreTrainedModel):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.embed_dropout = nn.Dropout(config.embd_pdrop)
         num_layers = config.num_hidden_layers
-        self.layers = nn.ModuleList(
-            [Phi3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([Phi3DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
-        self.block_time_embedders = nn.ModuleList([TimestepEmbedder(config.hidden_size) for _ in range(num_layers)])
+        self.t_embedder = TimestepEmbedder(config.hidden_size)
 
         self._attn_implementation = config._attn_implementation
         self.norm = Phi3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -887,7 +885,7 @@ class BlockPhi3Transformer(BlockPhi3):
         for index, layer in enumerate(self.layers):
             if block_timesteps is not None:
                 current_t = block_timesteps[:, index]
-                time_emb = self.block_time_embedders[index](current_t, dtype=hidden_states.dtype)
+                time_emb = self.t_embedder(current_t, dtype=hidden_states.dtype)
                 hidden_states = hidden_states + time_emb.unsqueeze(1)
 
             layer_idx += 1
@@ -983,12 +981,11 @@ class BlockPhi3Transformer(BlockPhi3):
 
             noisy_hidden_states = scheduler.add_noise(hidden_states, noise, timestep_tensor)
 
-            if hasattr(self, 'block_time_embedders'):
-                time_emb = self.block_time_embedders[index](
-                    timestep_tensor.float(), 
-                    dtype=noisy_hidden_states.dtype
-                )
-                noisy_hidden_states = noisy_hidden_states + time_emb.unsqueeze(1)
+            time_emb = self.t_embedder(
+                timestep_tensor.float(), 
+                dtype=noisy_hidden_states.dtype
+            )
+            noisy_hidden_states = noisy_hidden_states + time_emb.unsqueeze(1)
 
             hidden_states = noisy_hidden_states
 
