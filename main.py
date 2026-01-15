@@ -147,7 +147,7 @@ def inference_check(model: CustomOmniGen, data: DataLoader, vae, device=None):
 def main():
     batch_size = 4 # temporary for DeepSpeed memory issues
     lr = 1e-4
-    epochs = 700
+    epochs = 1000
 
     num_gpus = 4
 
@@ -215,14 +215,8 @@ def main():
             param.requires_grad = False
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-
-    optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=lr,
-        weight_decay=0.01
-    )
     
-    model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params, config=deepspeed_config, optimizer=optimizer)
+    model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params, config=deepspeed_config)
 
     for epoch in range(epochs):
         total_loss = 0.0
