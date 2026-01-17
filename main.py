@@ -258,9 +258,9 @@ def main():
 
             # loss_tensor = torch.tensor([loss.item()], device=device)
             # torch.distributed.all_reduce(loss_tensor)
-            # avg_loss_across = loss_tensor.item() / torch.distributed.get_world_size()
+            avg_loss_across = loss / torch.distributed.get_world_size()
 
-            # total_loss += avg_loss_across
+            total_loss += avg_loss_across
             num_batches += 1
 
         avg_loss = total_loss / num_batches
