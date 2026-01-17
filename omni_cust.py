@@ -497,7 +497,7 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
             
         batch_size = timestep.size(0)
         block_timesteps = []
-        num_blocks = len(self.llm.blocks)
+        num_blocks = len(self.llm.layers)
 
         t_schedule = torch.zeros(num_blocks + 1, device=timestep.device, dtype=timestep.dtype)
         t_schedule[0] = 1.0
