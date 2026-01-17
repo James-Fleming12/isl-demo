@@ -2,6 +2,7 @@ import json
 import os
 import time
 from matplotlib import pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -227,10 +228,6 @@ def main():
         if local_rank == 0: end_time = time.perf_counter()
 
         for batch_idx, data in enumerate(dataloader):
-            if local_rank == 0:
-                start_time = time.perf_counter()
-                print(f"Time between end of last loop and start of this: {start_time-end_time}")
-
             model_dtype = next(model_engine.parameters()).dtype
 
             output_images = data['output_images']
@@ -253,23 +250,78 @@ def main():
                 return_past_key_values=False
             )
 
-            if local_rank == 0:
-                process_time = time.perf_counter()
-                print(f"Time for Processing: {process_time}")
-
             loss_dict = isl_training_losses_scheduled(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
             if local_rank == 0:
-                forward_time = time.perf_counter()
-                print(f"Time for Forward Pass: {forward_time-process_time}")
+                print(f"\n=== Batch {batch_idx} Diagnostics ===")
+
+                print(f"Loss: {loss.item():.6f}")
+                print(f"Loss is NaN: {torch.isnan(loss).any().item()}")
+                print(f"Loss is Inf: {torch.isinf(loss).any().item()}")
+
+                for key, val in loss_dict.items():
+                    if torch.is_tensor(val):
+                        print(f"{key}: {val.item():.6f}, NaN: {torch.isnan(val).any().item()}, Inf: {torch.isinf(val).any().item()}")
+                
+                print(f"\nOutput images - min: {output_images.min().item():.4f}, max: {output_images.max().item():.4f}, mean: {output_images.mean().item():.4f}")
+                print(f"Output images NaN: {torch.isnan(output_images).any().item()}, Inf: {torch.isinf(output_images).any().item()}")
 
             model_engine.backward(loss)
-            model_engine.step()
 
             if local_rank == 0:
-                step_time = time.perf_counter()
-                print(f"Time for Model Step: {step_time-forward_time}")
+                print("\n=== Gradient Statistics ===")
+                
+                grad_norms = []
+                nan_grads = []
+                inf_grads = []
+                zero_grads = []
+                
+                for name, param in model_engine.named_parameters():
+                    if param.requires_grad and param.grad is not None:
+                        grad = param.grad
+
+                        if torch.isnan(grad).any():
+                            nan_grads.append(name)
+                        if torch.isinf(grad).any():
+                            inf_grads.append(name)
+                
+                        grad_norm = grad.norm().item()
+                        grad_norms.append((name, grad_norm))
+                        
+                        if grad_norm == 0:
+                            zero_grads.append(name)
+                    
+                        if grad_norms:
+                            grad_norms_sorted = sorted(grad_norms, key=lambda x: x[1], reverse=True)
+                            print(f"Top 5 gradient norms:")
+                            for name, norm in grad_norms_sorted[:5]:
+                                print(f"  {name}: {norm:.6f}")
+                            
+                            all_norms = [n for _, n in grad_norms]
+                            print(f"\nGradient norm stats:")
+                            print(f"  Min: {min(all_norms):.6f}")
+                            print(f"  Max: {max(all_norms):.6f}")
+                            print(f"  Mean: {np.mean(all_norms):.6f}")
+                            print(f"  Median: {np.median(all_norms):.6f}")
+                        
+                        if nan_grads:
+                            print(f"\n  WARNING: {len(nan_grads)} parameters have NaN gradients:")
+                            for name in nan_grads[:5]:
+                                print(f"  - {name}")
+                        
+                        if inf_grads:
+                            print(f"\n  WARNING: {len(inf_grads)} parameters have Inf gradients:")
+                            for name in inf_grads[:5]:
+                                print(f"  - {name}")
+                        
+                        if zero_grads:
+                            print(f"\n{len(zero_grads)} parameters have zero gradients")
+        
+                        if hasattr(model_engine, 'optimizer') and hasattr(model_engine.optimizer, 'cur_scale'):
+                            print(f"\nDeepSpeed loss scale: {model_engine.optimizer.cur_scale}")
+
+            model_engine.step()
 
             # loss_tensor = torch.tensor([loss.item()], device=device)
             # torch.distributed.all_reduce(loss_tensor)
@@ -277,9 +329,6 @@ def main():
 
             # total_loss += avg_loss_across
             num_batches += 1
-
-            if local_rank == 0:
-                end_time = time.perf_counter()
 
         avg_loss = total_loss / num_batches
 
