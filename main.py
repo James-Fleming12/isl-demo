@@ -151,6 +151,7 @@ def main():
     epochs = 1000
 
     num_gpus = 4
+    gradient_accumulation_steps = 8
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1)
@@ -165,7 +166,7 @@ def main():
 
     model = CustomOmniGen.from_pretrained("Shitao/OmniGen-v1")
     model.llm.config.use_cache = False
-    model.llm.gradient_checkpointing_enable()
+    # model.llm.gradient_checkpointing_enable()
     model.to(device)
     model.train()
     
@@ -191,10 +192,10 @@ def main():
 
     sampler = DistributedSampler(dataset)
     collate_fn = TrainDataCollator(pad_token_id=processor.text_tokenizer.eos_token_id, hidden_size=model.llm.config.hidden_size, keep_raw_resolution=True)
-    dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn, shuffle=False,num_workers=0,pin_memory=True)
+    dataloader = DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
     if local_rank == 0:
-        best_loss = float('inf')
+        # best_loss = float('inf')
         os.makedirs("logs", exist_ok=True)
         log_file = os.path.join("logs", f"log.txt")
 
@@ -204,7 +205,7 @@ def main():
     if deepspeed_config.get("train_micro_batch_size_per_gpu") == "auto":
         deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
     if deepspeed_config.get("train_batch_size") == "auto":
-        deepspeed_config["train_batch_size"] = batch_size * num_gpus
+        deepspeed_config["train_batch_size"] = batch_size * num_gpus * gradient_accumulation_steps
 
     params_to_freeze = [
         'input_x_embedder.proj.weight',
@@ -220,7 +221,7 @@ def main():
     model_engine, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=trainable_params, config=deepspeed_config)
 
     for epoch in range(epochs):
-        total_loss = 0.0
+        epoch_loss = torch.tensor(0.0, device=device)
         num_batches = 0
         
         dataloader.sampler.set_epoch(epoch)
@@ -256,14 +257,11 @@ def main():
             model_engine.backward(loss)
             model_engine.step()
 
-            # loss_tensor = torch.tensor([loss.item()], device=device)
-            # torch.distributed.all_reduce(loss_tensor)
-            avg_loss_across = loss / torch.distributed.get_world_size()
-
-            total_loss += avg_loss_across
+            epoch_loss += loss.detach() # apparently avoids syncing
             num_batches += 1
 
-        avg_loss = total_loss / num_batches
+        torch.distributed.all_reduce(epoch_loss)
+        avg_loss = (epoch_loss / num_batches / torch.distributed.get_world_size()).item()
 
         if local_rank == 0:
             print(f"Epoch {epoch} Loss: {avg_loss}")
