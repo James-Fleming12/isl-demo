@@ -772,6 +772,347 @@ class CustomOmniGen(nn.Module, PeftAdapterMixin):
 
         return final_pred, intermediate_results
 
+class EffISLOmniGen(nn.Module, PeftAdapterMixin):
+    def __init__(
+        self,
+        transformer_config: Phi3Config,
+        patch_size=2,
+        in_channels=4,
+        pe_interpolation: float = 1.0,
+        pos_embed_max_size: int = 192,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.patch_size = patch_size
+        self.pos_embed_max_size = pos_embed_max_size
+
+        hidden_size = transformer_config.hidden_size
+
+        self.x_embedder = PatchEmbedMR(patch_size, in_channels, hidden_size, bias=True)
+        self.input_x_embedder = PatchEmbedMR(patch_size, in_channels, hidden_size, bias=True)
+
+        self.time_token = TimestepEmbedder(hidden_size)
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        
+        self.pe_interpolation = pe_interpolation
+        pos_embed = get_2d_sincos_pos_embed(hidden_size, pos_embed_max_size, interpolation_scale=self.pe_interpolation, base_size=64)
+        self.register_buffer("pos_embed", torch.from_numpy(pos_embed).float().unsqueeze(0), persistent=True)
+
+        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+
+        self.initialize_weights()
+
+        self.llm = BlockPhi3Transformer(transformer_config)
+        self.llm.config.use_cache = False
+
+        self.num_layers = transformer_config.num_hidden_layers + 1
+    
+    @classmethod
+    def from_pretrained(cls, model_name: str, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = os.getenv('HF_HUB_CACHE')
+
+        if not os.path.exists(model_name):
+            print(f"Downloading model from {model_name}...")
+            model_name = snapshot_download(
+                repo_id=model_name,
+                cache_dir=cache_dir,
+                ignore_patterns=['flax_model.msgpack', 'rust_model.ot', 'tf_model.h5']
+            )
+            print(f"Model cached at: {model_name}")
+        else:
+            print(f"Loading model from local path: {model_name}")
+
+        config = Phi3Config.from_pretrained(model_name)
+        model = cls(config)
+
+        safetensors_path = os.path.join(model_name, 'model.safetensors')
+        pt_path = os.path.join(model_name, 'model.pt')
+        
+        if os.path.exists(safetensors_path):
+            print("Loading safetensors checkpoint")
+            ckpt = load_file(safetensors_path)
+        elif os.path.exists(pt_path):
+            print("Loading PyTorch checkpoint")
+            ckpt = torch.load(pt_path, map_location='cpu')
+        else:
+            raise FileNotFoundError(
+                f"No checkpoint found at {model_name}. "
+                f"Expected either 'model.safetensors' or 'model.pt'"
+            )
+
+        model.load_state_dict(ckpt)
+        print("Model loaded successfully")
+        
+        return model
+
+    def initialize_weights(self):
+        assert not hasattr(self, "llama")
+
+        # Initialize transformer layers:
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+        
+        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
+        w = self.x_embedder.proj.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.x_embedder.proj.bias, 0)
+
+        w = self.input_x_embedder.proj.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.input_x_embedder.proj.bias, 0)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.time_token.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.time_token.mlp[2].weight, std=0.02)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
+
+    def unpatchify(self, x, h, w):
+        """
+        x: (N, T, patch_size**2 * C)
+        imgs: (N, H, W, C)
+        """
+        c = self.out_channels
+
+        x = x.reshape(shape=(x.shape[0], h//self.patch_size, w//self.patch_size, self.patch_size, self.patch_size, c))
+        x = torch.einsum('nhwpqc->nchpwq', x)
+        imgs = x.reshape(shape=(x.shape[0], c, h, w))
+        return imgs
+
+    def cropped_pos_embed(self, height, width):
+        """Crops positional embeddings for SD3 compatibility."""
+        if self.pos_embed_max_size is None:
+            raise ValueError("`pos_embed_max_size` must be set for cropping.")
+
+        height = height // self.patch_size
+        width = width // self.patch_size
+        if height > self.pos_embed_max_size:
+            raise ValueError(
+                f"Height ({height}) cannot be greater than `pos_embed_max_size`: {self.pos_embed_max_size}."
+            )
+        if width > self.pos_embed_max_size:
+            raise ValueError(
+                f"Width ({width}) cannot be greater than `pos_embed_max_size`: {self.pos_embed_max_size}."
+            )
+
+        top = (self.pos_embed_max_size - height) // 2
+        left = (self.pos_embed_max_size - width) // 2
+        spatial_pos_embed = self.pos_embed.reshape(1, self.pos_embed_max_size, self.pos_embed_max_size, -1)
+        spatial_pos_embed = spatial_pos_embed[:, top : top + height, left : left + width, :]
+        spatial_pos_embed = spatial_pos_embed.reshape(1, -1, spatial_pos_embed.shape[-1])
+        return spatial_pos_embed
+
+    def patch_multiple_resolutions(self, latents, padding_latent=None, is_input_images:bool=False):
+        if isinstance(latents, list):
+            return_list = False
+            if padding_latent is None:
+                padding_latent = [None] * len(latents)
+                return_list = True
+            patched_latents, num_tokens, shapes = [], [], []
+            for latent, padding in zip(latents, padding_latent):
+                height, width = latent.shape[-2:]
+                if is_input_images:
+                    latent = self.input_x_embedder(latent)
+                else:
+                    latent = self.x_embedder(latent)
+                pos_embed = self.cropped_pos_embed(height, width)    
+                latent = latent + pos_embed
+                if padding is not None:
+                    latent = torch.cat([latent, padding], dim=-2)
+                patched_latents.append(latent)
+
+                num_tokens.append(pos_embed.size(1))
+                shapes.append([height, width])
+            if not return_list:
+                latents = torch.cat(patched_latents, dim=0)
+            else:
+                latents = patched_latents
+        else:
+            height, width = latents.shape[-2:]
+            if is_input_images:
+                latents = self.input_x_embedder(latents)
+            else:
+                latents = self.x_embedder(latents)
+            pos_embed = self.cropped_pos_embed(height, width)  
+            latents = latents + pos_embed
+            num_tokens = latents.size(1)
+            shapes = [height, width]
+
+        return latents, num_tokens, shapes
+    
+    def _process_hidden_state_to_image(self, hidden_state, num_tokens, shapes, layer_time_emb, input_is_list):
+        """
+        Convert a single hidden state to image space
+        """
+        if input_is_list:
+            max_tokens = max(num_tokens)
+            layer_embedding = hidden_state[:, -max_tokens:]
+        else:
+            layer_embedding = hidden_state[:, -num_tokens:]
+
+        projected = self.final_layer(layer_embedding, layer_time_emb)
+
+        if input_is_list:
+            latents_per_layer = []
+            for j, (nt, shape) in enumerate(zip(num_tokens, shapes)):
+                latent = projected[j:j+1, :nt]
+                latent_unpatched = self.unpatchify(latent, shape[0], shape[1])
+                latents_per_layer.append(latent_unpatched)
+            return latents_per_layer
+        else:
+            return self.unpatchify(projected, shapes[0], shapes[1])
+
+    def forward(self, x, timestep, input_ids, input_img_latents, input_image_sizes, attention_mask, position_ids, padding_latent=None, past_key_values=None, return_past_key_values=True, offload_model:bool=False):
+        input_is_list = isinstance(x, list)
+        x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
+        
+        if input_is_list:
+            time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)
+        else:
+            time_token = self.time_token(timestep, dtype=x.dtype).unsqueeze(1)
+
+        if input_img_latents is not None:
+            input_latents, _, _ = self.patch_multiple_resolutions(input_img_latents, is_input_images=True)
+        
+        if input_ids is not None:
+            condition_embeds = self.llm.embed_tokens(input_ids).clone()
+            input_img_inx = 0
+            for b_inx in input_image_sizes.keys():
+                for start_inx, end_inx in input_image_sizes[b_inx]:
+                    condition_embeds[b_inx, start_inx: end_inx] = input_latents[input_img_inx]
+                    input_img_inx += 1
+            if input_img_latents is not None:
+                assert input_img_inx == len(input_latents)
+            
+            input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
+        else:
+            input_emb = torch.cat([time_token, x], dim=1)
+
+        if attention_mask is not None and attention_mask.dim() == 3:
+            dtype = input_emb.dtype
+            min_dtype = torch.finfo(dtype).min
+            attention_mask = (1 - attention_mask) * min_dtype
+            attention_mask = attention_mask.unsqueeze(1).to(input_emb.dtype)
+        
+        batch_size = timestep.size(0)
+        num_blocks = len(self.llm.layers)
+
+        layer_idx_tensor = torch.arange(self.num_layers, device=timestep.device, dtype=timestep.dtype)
+        hidden_t_schedule = timestep.unsqueeze(1) * (1.0 - layer_idx_tensor[:-1].unsqueeze(0) / (num_blocks + 1))
+        last_layer = torch.zeros(batch_size, 1, device=timestep.device, dtype=timestep.dtype)
+        hidden_timesteps = torch.cat([hidden_t_schedule, last_layer], dim=1)
+
+        all_times = hidden_timesteps.flatten()
+        all_time_embs = self.t_embedder(all_times, dtype=input_emb.dtype)
+        time_embs = all_time_embs.view(batch_size, self.num_layers, -1)
+
+        t_schedule = torch.zeros(num_blocks + 1, device=timestep.device, dtype=timestep.dtype)
+        t_schedule[0] = 1.0
+        for i in range(num_blocks):
+            t_schedule[i+1] = 1.0 - (i+1)/(num_blocks+1)
+        t_schedule = t_schedule[:-1]
+        block_timesteps = t_schedule.unsqueeze(0).expand(batch_size, -1)
+
+        unpatched_hidden_states = []
+        hidden_states = input_emb
+
+        # process each layer independently
+        for index, layer in enumerate(self.llm.layers):
+            if block_timesteps is not None:
+                current_t = block_timesteps[:, index]
+                time_emb = self.t_embedder(current_t, dtype=hidden_states.dtype)
+                hidden_states = hidden_states + time_emb.unsqueeze(1)
+
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=None,
+                output_attentions=False,
+                use_cache=False,
+                cache_position=None,
+            )
+            hidden_states = layer_outputs[0]
+
+            layer_time_emb_proj = time_embs[:, index]
+
+            layer_image = self._process_hidden_state_to_image(
+                hidden_states, 
+                num_tokens, 
+                shapes, 
+                layer_time_emb_proj,
+                input_is_list
+            )
+            unpatched_hidden_states.append(layer_image)
+
+        hidden_states = self.llm.norm(hidden_states)
+
+        if input_is_list:
+            max_tokens = max(num_tokens)
+            image_embedding = hidden_states[:, -max_tokens:]
+            final_time_emb = self.t_embedder(timestep, dtype=x[0].dtype)
+            final_proj = self.final_layer(image_embedding, final_time_emb)
+            
+            latents = []
+            for i, (nt, shape) in enumerate(zip(num_tokens, shapes)):
+                latent = final_proj[i:i+1, :nt]
+                latent = self.unpatchify(latent, shape[0], shape[1])
+                latents.append(latent)
+        else:
+            image_embedding = hidden_states[:, -num_tokens:]
+            final_time_emb = self.t_embedder(timestep, dtype=x.dtype)
+            final_proj = self.final_layer(image_embedding, final_time_emb)
+            latents = self.unpatchify(final_proj, shapes[0], shapes[1])
+
+        if input_is_list:
+            final_latents = []
+            for i in range(len(latents)):
+                final_latents.append(latents[i])
+            unpatched_hidden_states.append(final_latents)
+        else:
+            unpatched_hidden_states.append(latents)
+        
+        if return_past_key_values:
+            return latents, None
+        return latents, unpatched_hidden_states
+        
+    @torch.no_grad()
+    def generate(self, x: torch.Tensor, input_ids: torch.Tensor, input_img_latents: Optional[torch.Tensor], input_image_sizes: dict, attention_mask: torch.Tensor, position_ids: torch.Tensor, guidance_scale: float = 1.0, generator: Optional[torch.Generator] = None):
+        B = x.shape[0]
+        device = x.device
+
+        timestep = torch.ones((B,), device=device, dtype=torch.float32)
+
+        final_pred, intermediate_preds = self.forward(
+            x=x,
+            timestep=timestep,
+            input_ids=input_ids,
+            input_img_latents=input_img_latents,
+            input_image_sizes=input_image_sizes,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            padding_latent=None,
+            past_key_values=None,
+            return_past_key_values=False,
+            offload_model=False,
+        )
+
+        intermediate_results = [pred.clone() for pred in intermediate_preds]
+
+        return final_pred, intermediate_results
+
 def noise_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None):
     """Loss based on iterative noise levels
     Args:

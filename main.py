@@ -15,7 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 
-from omni_cust import CustomOmniGen, JsonFolderDataset, isl_training_losses, isl_training_losses_scheduled
+from omni_cust import EffISLOmniGen, JsonFolderDataset, isl_training_losses, isl_training_losses_scheduled
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.utils import vae_encode, vae_encode_list
 from transformers import Phi3Config
@@ -80,7 +80,7 @@ def visualize_block_progression(noisy_input, block_outputs, ground_truths=None, 
     plt.tight_layout()
     plt.savefig("inference_check.png")
 
-def inference_check(model: CustomOmniGen, data: DataLoader, vae, device=None):
+def inference_check(model: EffISLOmniGen, data: DataLoader, vae, device=None):
     """
     vae is the model for decoding latents back to images
     """
@@ -151,7 +151,7 @@ def main():
     epochs = 1000
 
     num_gpus = 4
-    gradient_accumulation_steps = 8
+    gradient_accumulation_steps = 1
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=-1)
@@ -164,9 +164,9 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
 
-    model = CustomOmniGen.from_pretrained("Shitao/OmniGen-v1")
+    model = EffISLOmniGen.from_pretrained("Shitao/OmniGen-v1")
     model.llm.config.use_cache = False
-    # model.llm.gradient_checkpointing_enable()
+    model.llm.gradient_checkpointing_enable()
     model.to(device)
     model.train()
     
