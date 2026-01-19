@@ -1101,6 +1101,7 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
         layer_weights,     # weights for each layer
         padding_latent=None, 
         past_key_values=None, 
+        return_past_key_values=False,
         offload_model:bool=False
     ):
         input_is_list = isinstance(x, list)
@@ -1409,7 +1410,7 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 
     return terms
 
-def isl_training_losses_streaming(model, x1, model_kwargs=None, main_loss_scale=5):
+def isl_training_losses_streaming(model: EffISLOmniGen, x1, model_kwargs=None, main_loss_scale=5):
     """
     Args:
         model: UltimateMemoryEfficientOmniGen wrapped in DeepSpeed
@@ -1438,13 +1439,7 @@ def isl_training_losses_streaming(model, x1, model_kwargs=None, main_loss_scale=
     layer_weights = torch.ones(num_layers, device=device, dtype=torch.float32)
     layer_weights[-1] = main_loss_scale
 
-    final_output, total_loss = model.forward_with_loss_callback(
-        xt, 
-        t,
-        ground_truth_x1=x1,
-        layer_weights=layer_weights,
-        **model_kwargs
-    )
+    final_output, total_loss = model.forward_with_loss_callback(xt, t, ground_truth_x1=x1, layer_weights=layer_weights, **model_kwargs)
 
     total_loss = total_loss / layer_weights.sum()
 
