@@ -15,7 +15,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from OmniGenCode.OmniGen.train_helper.data import TrainDataCollator
 
-from omni_cust import EffISLOmniGen, JsonFolderDataset, isl_training_losses, isl_training_losses_scheduled
+from omni_cust import EffISLOmniGen, JsonFolderDataset, isl_training_losses, isl_training_losses_streaming
 from OmniGenCode.OmniGen.processor import OmniGenProcessor
 from OmniGenCode.OmniGen.utils import vae_encode, vae_encode_list
 from transformers import Phi3Config
@@ -251,7 +251,7 @@ def main():
                 return_past_key_values=False
             )
 
-            loss_dict = isl_training_losses(model_engine, output_images, model_kwargs=model_kwargs)
+            loss_dict = isl_training_losses_streaming(model_engine, output_images, model_kwargs=model_kwargs)
             loss = loss_dict["loss"]
 
             model_engine.backward(loss)
