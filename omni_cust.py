@@ -1087,7 +1087,7 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
         if return_past_key_values:
             return latents, None
         return latents, unpatched_hidden_states
-    
+
     def forward_with_loss_callback(
         self, 
         x, 
@@ -1106,7 +1106,7 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
     ):
         input_is_list = isinstance(x, list)
         x, num_tokens, shapes = self.patch_multiple_resolutions(x, padding_latent)
-        
+
         if input_is_list:
             time_token = self.time_token(timestep, dtype=x[0].dtype).unsqueeze(1)
         else:
@@ -1114,26 +1114,32 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
 
         if input_img_latents is not None:
             input_latents, _, _ = self.patch_multiple_resolutions(input_img_latents, is_input_images=True)
-        
+        else:
+            input_latents = None
+
         if input_ids is not None:
-            condition_embeds = self.llm.embed_tokens(input_ids).clone()
-            input_img_inx = 0
-            for b_inx in input_image_sizes.keys():
-                for start_inx, end_inx in input_image_sizes[b_inx]:
-                    condition_embeds[b_inx, start_inx: end_inx] = input_latents[input_img_inx]
-                    input_img_inx += 1
-            if input_img_latents is not None:
+            condition_embeds = self.llm.embed_tokens(input_ids)
+            if input_latents is not None:
+                condition_embeds = condition_embeds.clone()
+                input_img_inx = 0
+                for b_inx in input_image_sizes.keys():
+                    for start_inx, end_inx in input_image_sizes[b_inx]:
+                        condition_embeds[b_inx, start_inx: end_inx] = input_latents[input_img_inx]
+                        input_img_inx += 1
                 assert input_img_inx == len(input_latents)
+                del input_latents
             
             input_emb = torch.cat([condition_embeds, time_token, x], dim=1)
+            del condition_embeds, time_token
         else:
             input_emb = torch.cat([time_token, x], dim=1)
+            del time_token
 
         if attention_mask is not None and attention_mask.dim() == 3:
             dtype = input_emb.dtype
             min_dtype = torch.finfo(dtype).min
             attention_mask = (1 - attention_mask) * min_dtype
-            attention_mask = attention_mask.unsqueeze(1).to(input_emb.dtype)
+            attention_mask = attention_mask.unsqueeze(1).to(dtype)
         
         batch_size = timestep.size(0)
         num_blocks = len(self.llm.layers)
@@ -1142,26 +1148,32 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
         hidden_t_schedule = timestep.unsqueeze(1) * (1.0 - layer_idx_tensor[:-1].unsqueeze(0) / (num_blocks + 1))
         last_layer = torch.zeros(batch_size, 1, device=timestep.device, dtype=timestep.dtype)
         hidden_timesteps = torch.cat([hidden_t_schedule, last_layer], dim=1)
+        
+        del layer_idx_tensor, hidden_t_schedule, last_layer
 
         all_times = hidden_timesteps.flatten()
         all_time_embs = self.t_embedder(all_times, dtype=input_emb.dtype)
         time_embs = all_time_embs.view(batch_size, self.num_layers, -1)
+        
+        del all_times, all_time_embs, hidden_timesteps
 
-        t_schedule = torch.zeros(num_blocks + 1, device=timestep.device, dtype=timestep.dtype)
-        t_schedule[0] = 1.0
-        for i in range(num_blocks):
-            t_schedule[i+1] = 1.0 - (i+1)/(num_blocks+1)
-        t_schedule = t_schedule[:-1]
+        t_schedule = torch.linspace(1.0, 1.0 - num_blocks/(num_blocks+1), num_blocks, 
+                                    device=timestep.device, dtype=timestep.dtype)
         block_timesteps = t_schedule.unsqueeze(0).expand(batch_size, -1)
+        
+        del t_schedule
 
-        total_loss = torch.tensor(0.0, device=x.device if not input_is_list else x[0].device, dtype=torch.float32)
+        total_loss = torch.zeros(1, device=x.device if not input_is_list else x[0].device, 
+                                dtype=torch.float32, requires_grad=False)
         hidden_states = input_emb
+        del input_emb
 
         for index, layer in enumerate(self.llm.layers):
-            if block_timesteps is not None:
-                current_t = block_timesteps[:, index]
-                time_emb = self.t_embedder(current_t, dtype=hidden_states.dtype)
-                hidden_states = hidden_states + time_emb.unsqueeze(1)
+            # Add timestep embedding
+            current_t = block_timesteps[:, index]
+            time_emb = self.t_embedder(current_t, dtype=hidden_states.dtype)
+            hidden_states = hidden_states + time_emb.unsqueeze(1)
+            del time_emb, current_t
 
             layer_outputs = layer(
                 hidden_states,
@@ -1173,6 +1185,7 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
                 cache_position=None,
             )
             hidden_states = layer_outputs[0]
+            del layer_outputs
 
             layer_time_emb_proj = time_embs[:, index]
             layer_image = self._process_hidden_state_to_image(
@@ -1182,15 +1195,22 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
                 layer_time_emb_proj,
                 input_is_list
             )
+            del layer_time_emb_proj
 
             if isinstance(layer_image, list):
                 layer_image_cat = torch.cat(layer_image, dim=0) if layer_image[0].dim() == 4 else torch.stack(layer_image, dim=0)
+                del layer_image
             else:
                 layer_image_cat = layer_image
 
-            layer_loss = ((ground_truth_x1 - layer_image_cat) ** 2).mean()
+            diff = ground_truth_x1 - layer_image_cat
+            layer_loss = (diff * diff).mean()
+            del diff, layer_image_cat
 
-            total_loss = total_loss + layer_weights[index] * layer_loss
+            total_loss.add_(layer_weights[index] * layer_loss)
+            del layer_loss
+
+        del block_timesteps, attention_mask, position_ids
 
         hidden_states = self.llm.norm(hidden_states)
 
@@ -1199,27 +1219,35 @@ class EffISLOmniGen(nn.Module, PeftAdapterMixin):
             image_embedding = hidden_states[:, -max_tokens:]
             final_time_emb = self.t_embedder(timestep, dtype=x[0].dtype)
             final_proj = self.final_layer(image_embedding, final_time_emb)
+            del image_embedding, final_time_emb
             
             latents = []
             for i, (nt, shape) in enumerate(zip(num_tokens, shapes)):
                 latent = final_proj[i:i+1, :nt]
                 latent = self.unpatchify(latent, shape[0], shape[1])
                 latents.append(latent)
+            del final_proj
+            
+            final_cat = torch.cat(latents, dim=0) if latents[0].dim() == 4 else torch.stack(latents, dim=0)
+            del latents
         else:
             image_embedding = hidden_states[:, -num_tokens:]
             final_time_emb = self.t_embedder(timestep, dtype=x.dtype)
             final_proj = self.final_layer(image_embedding, final_time_emb)
-            latents = self.unpatchify(final_proj, shapes[0], shapes[1])
+            del image_embedding, final_time_emb
+            final_cat = self.unpatchify(final_proj, shapes[0], shapes[1])
+            del final_proj
+        
+        del hidden_states, time_embs
+    
+        diff = ground_truth_x1 - final_cat
+        final_loss = (diff * diff).mean()
+        del diff
+        
+        total_loss.add_(layer_weights[-1] * final_loss)
+        del final_loss
 
-        if input_is_list:
-            final_cat = torch.cat(latents, dim=0) if latents[0].dim() == 4 else torch.stack(latents, dim=0)
-        else:
-            final_cat = latents
-        
-        final_loss = ((ground_truth_x1 - final_cat) ** 2).mean()
-        total_loss = total_loss + layer_weights[-1] * final_loss
-        
-        return latents, total_loss
+        return final_cat, total_loss.squeeze()
         
     @torch.no_grad()
     def generate(self, x: torch.Tensor, input_ids: torch.Tensor, input_img_latents: Optional[torch.Tensor], input_image_sizes: dict, attention_mask: torch.Tensor, position_ids: torch.Tensor, guidance_scale: float = 1.0, generator: Optional[torch.Generator] = None):
@@ -1413,14 +1441,14 @@ def isl_training_losses(model, x1, model_kwargs=None, snr_type='uniform', patch_
 def isl_training_losses_streaming(model: EffISLOmniGen, x1, model_kwargs=None, main_loss_scale=5):
     """
     Args:
-        model: UltimateMemoryEfficientOmniGen wrapped in DeepSpeed
+        model: EffISLOmniGen wrapped in DeepSpeed
         x1: Ground truth clean images
         model_kwargs: Additional model arguments
         main_loss_scale: Weight for final layer loss
     """
     if model_kwargs is None:
         model_kwargs = {}
-    
+
     if isinstance(x1, list):
         x1 = torch.cat(x1, dim=0) if x1[0].dim() == 4 else torch.stack(x1, dim=0)
     
@@ -1428,22 +1456,35 @@ def isl_training_losses_streaming(model: EffISLOmniGen, x1, model_kwargs=None, m
     model_dtype = next(model.parameters()).dtype
     
     B = x1.shape[0]
-    x0 = torch.randn_like(x1).to(model_dtype)
+
     x1 = x1.to(model_dtype)
+    x0 = torch.randn_like(x1, dtype=model_dtype, device=device)
     
     t = torch.ones(B, device=device, dtype=model_dtype)
+
     t_view = t.view(-1, 1, 1, 1)
-    xt = t_view * x0 + (1 - t_view) * x1
+    xt = x0.mul_(t_view).add_(x1, alpha=(1 - t_view.item()))
+
+    del t_view
 
     num_layers = model.module.num_layers if hasattr(model, 'module') else model.num_layers
     layer_weights = torch.ones(num_layers, device=device, dtype=torch.float32)
     layer_weights[-1] = main_loss_scale
 
-    final_output, total_loss = model.forward_with_loss_callback(xt, t, ground_truth_x1=x1, layer_weights=layer_weights, **model_kwargs)
+    final_output, total_loss = model.forward_with_loss_callback(
+        xt, 
+        t,
+        ground_truth_x1=x1,
+        layer_weights=layer_weights,
+        **model_kwargs
+    )
 
-    total_loss = total_loss / layer_weights.sum()
-
+    del xt, final_output, layer_weights, x1, t
+    
+    total_loss = total_loss / (num_layers - 1 + main_loss_scale)
+    
     return {"loss": total_loss}
+
 
 def isl_training_losses_scheduled(model, x1, model_kwargs=None, snr_type='uniform', patch_weight=None, main_loss_scale=5):
     """x1 prediction Loss for training the score model

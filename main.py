@@ -260,6 +260,8 @@ def main():
             epoch_loss += loss.detach() # apparently avoids syncing
             num_batches += 1
 
+            del output_images, padding_latent, model_kwargs, loss_dict, loss
+
         torch.distributed.all_reduce(epoch_loss)
         avg_loss = (epoch_loss / num_batches / torch.distributed.get_world_size()).item()
 
