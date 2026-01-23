@@ -1447,7 +1447,7 @@ def isl_training_losses_streaming(model: EffISLOmniGen, x1, model_kwargs=None, m
         main_loss_scale: Weight for final layer loss
     """
     if model_kwargs is None:
-        model_kwargs = {}
+            model_kwargs = {}
 
     if isinstance(x1, list):
         x1 = torch.cat(x1, dim=0) if x1[0].dim() == 4 else torch.stack(x1, dim=0)
@@ -1461,16 +1461,16 @@ def isl_training_losses_streaming(model: EffISLOmniGen, x1, model_kwargs=None, m
     x0 = torch.randn_like(x1, dtype=model_dtype, device=device)
     
     t = torch.ones(B, device=device, dtype=model_dtype)
-
     t_view = t.view(-1, 1, 1, 1)
-    xt = x0.mul_(t_view).add_(x1, alpha=(1 - t_view.item()))
 
-    del t_view
+    xt = t_view * x0 + (1 - t_view) * x1
 
-    num_layers = model.module.num_layers if hasattr(model, 'module') else model.num_layers
+    del x0, t_view
+
+    num_layers = model.module.num_layers
     layer_weights = torch.ones(num_layers, device=device, dtype=torch.float32)
     layer_weights[-1] = main_loss_scale
-
+    
     final_output, total_loss = model.forward_with_loss_callback(
         xt, 
         t,
@@ -1478,7 +1478,7 @@ def isl_training_losses_streaming(model: EffISLOmniGen, x1, model_kwargs=None, m
         layer_weights=layer_weights,
         **model_kwargs
     )
-
+    
     del xt, final_output, layer_weights, x1, t
     
     total_loss = total_loss / (num_layers - 1 + main_loss_scale)
